@@ -1,0 +1,95 @@
+package crypto
+
+import (
+	"errors"
+	"time"
+
+	"github.com/golang-jwt/jwt/v5"
+	"github.com/google/uuid"
+)
+
+var (
+	ErrInvalidToken = errors.New("invalid or expired authorization token")
+)
+
+type StaffClaims struct {
+	StaffID      uuid.UUID `json:"staff_id"`
+	RestaurantID uuid.UUID `json:"restaurant_id"`
+	Role         string    `json:"role"`
+	IsPlatform   bool      `json:"is_platform"`
+	jwt.RegisteredClaims
+}
+
+type GuardClaims struct {
+	GuardID      uuid.UUID `json:"guard_id"`
+	RestaurantID uuid.UUID `json:"restaurant_id"`
+	jwt.RegisteredClaims
+}
+
+// GenerateStaffJWT creates a signed JWT for staff or platform admin users.
+func GenerateStaffJWT(secret []byte, staffID, restaurantID uuid.UUID, role string, isPlatform bool, ttl time.Duration) (string, error) {
+	claims := StaffClaims{
+		StaffID:      staffID,
+		RestaurantID: restaurantID,
+		Role:         role,
+		IsPlatform:   isPlatform,
+		RegisteredClaims: jwt.RegisteredClaims{
+			ExpiresAt: jwt.NewNumericDate(time.Now().Add(ttl)),
+			IssuedAt:  jwt.NewNumericDate(time.Now()),
+			Subject:   staffID.String(),
+		},
+	}
+	token := jwt.NewWithClaims(jwt.SigningMethodHS256, claims)
+	return token.SignedString(secret)
+}
+
+// ParseStaffJWT verifies and extracts StaffClaims from a token.
+func ParseStaffJWT(secret []byte, tokenStr string) (*StaffClaims, error) {
+	token, err := jwt.ParseWithClaims(tokenStr, &StaffClaims{}, func(t *jwt.Token) (interface{}, error) {
+		if _, ok := t.Method.(*jwt.SigningMethodHMAC); !ok {
+			return nil, ErrInvalidToken
+		}
+		return secret, nil
+	})
+	if err != nil || !token.Valid {
+		return nil, ErrInvalidToken
+	}
+	claims, ok := token.Claims.(*StaffClaims)
+	if !ok {
+		return nil, ErrInvalidToken
+	}
+	return claims, nil
+}
+
+// GenerateGuardJWT creates a signed JWT for guard exit verification.
+func GenerateGuardJWT(secret []byte, guardID, restaurantID uuid.UUID, ttl time.Duration) (string, error) {
+	claims := GuardClaims{
+		GuardID:      guardID,
+		RestaurantID: restaurantID,
+		RegisteredClaims: jwt.RegisteredClaims{
+			ExpiresAt: jwt.NewNumericDate(time.Now().Add(ttl)),
+			IssuedAt:  jwt.NewNumericDate(time.Now()),
+			Subject:   guardID.String(),
+		},
+	}
+	token := jwt.NewWithClaims(jwt.SigningMethodHS256, claims)
+	return token.SignedString(secret)
+}
+
+// ParseGuardJWT verifies and extracts GuardClaims.
+func ParseGuardJWT(secret []byte, tokenStr string) (*GuardClaims, error) {
+	token, err := jwt.ParseWithClaims(tokenStr, &GuardClaims{}, func(t *jwt.Token) (interface{}, error) {
+		if _, ok := t.Method.(*jwt.SigningMethodHMAC); !ok {
+			return nil, ErrInvalidToken
+		}
+		return secret, nil
+	})
+	if err != nil || !token.Valid {
+		return nil, ErrInvalidToken
+	}
+	claims, ok := token.Claims.(*GuardClaims)
+	if !ok {
+		return nil, ErrInvalidToken
+	}
+	return claims, nil
+}

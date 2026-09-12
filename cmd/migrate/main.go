@@ -1,0 +1,58 @@
+package main
+
+import (
+	"context"
+	"fmt"
+	"log/slog"
+	"os"
+	"time"
+
+	"github.com/devrishijain/table-manager/internal/config"
+	"github.com/jackc/pgx/v5"
+)
+
+func main() {
+	logger := slog.New(slog.NewJSONHandler(os.Stdout, nil))
+	slog.SetDefault(logger)
+
+	cfg, err := config.Load()
+	if err != nil {
+		logger.Error("Failed to load configuration", "error", err)
+		os.Exit(1)
+	}
+
+	logger.Info("Starting PostgreSQL migration runner", "database_url", cfg.Database.URL)
+
+	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+	defer cancel()
+
+	conn, err := pgx.Connect(ctx, cfg.Database.URL)
+	if err != nil {
+		logger.Error("Failed to connect to PostgreSQL database", "error", err)
+		os.Exit(1)
+	}
+	defer conn.Close(ctx)
+
+	migrationFiles := []string{
+		"internal/storage/postgres/migrations/001_initial_schema.sql",
+		"internal/storage/postgres/migrations/002_rls_policies.sql",
+		"internal/storage/postgres/migrations/003_schema_sync.sql",
+	}
+
+	for _, file := range migrationFiles {
+		content, err := os.ReadFile(file)
+		if err != nil {
+			logger.Error("Failed to read migration file", "file", file, "error", err)
+			os.Exit(1)
+		}
+
+		logger.Info("Applying migration", "file", file, "size_bytes", len(content))
+		if _, err := conn.Exec(ctx, string(content)); err != nil {
+			logger.Error("Migration failed", "file", file, "error", err)
+			os.Exit(1)
+		}
+		fmt.Printf("✓ Successfully applied %s\n", file)
+	}
+
+	logger.Info("All database migrations applied successfully")
+}
