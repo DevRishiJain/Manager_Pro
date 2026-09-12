@@ -15,8 +15,12 @@ import (
 	"github.com/devrishijain/table-manager/internal/api/handlers"
 	"github.com/devrishijain/table-manager/internal/config"
 	"github.com/devrishijain/table-manager/internal/service"
+	domainstorage "github.com/devrishijain/table-manager/internal/storage"
 	"github.com/devrishijain/table-manager/internal/storage/memory"
+	"github.com/devrishijain/table-manager/internal/storage/postgres"
 	"github.com/devrishijain/table-manager/internal/worker"
+	"github.com/jackc/pgx/v5"
+	"github.com/jackc/pgx/v5/pgxpool"
 )
 
 func main() {
@@ -38,8 +42,43 @@ func main() {
 	)
 
 	// Storage initialization
-	repo := memory.NewMemoryRepository()
-	objectStore := storage.NewMemoryObjectStore()
+	var repo domainstorage.Repository = memory.NewMemoryRepository()
+	if cfg.Database.URL != "" {
+		poolCtx, poolCancel := context.WithTimeout(context.Background(), 5*time.Second)
+		pgxCfg, err := pgxpool.ParseConfig(cfg.Database.URL)
+		if err == nil {
+			pgxCfg.MaxConns = int32(cfg.Database.MaxOpenConns)
+			pgxCfg.MinConns = int32(cfg.Database.MaxIdleConns)
+			pgxCfg.AfterConnect = func(ctx context.Context, conn *pgx.Conn) error {
+				_, err := conn.Exec(ctx, "SET app.is_platform_admin = 'true'")
+				return err
+			}
+			pool, err := pgxpool.NewWithConfig(poolCtx, pgxCfg)
+			if err == nil && pool.Ping(poolCtx) == nil {
+				repo = postgres.NewPostgresRepository(pool)
+				logger.Info("PostgreSQL database repository connected & active", "db_url", cfg.Database.URL)
+			} else {
+				logger.Warn("PostgreSQL connection failed, using memory fallback", "error", err)
+			}
+		}
+		poolCancel()
+	}
+
+	var objectStore storage.ObjectStore
+	if cfg.Storage.Type == "minio" || cfg.Storage.Type == "s3" {
+		objectStore = storage.NewS3ObjectStore(storage.S3Config{
+			Region:          cfg.Storage.Region,
+			BucketName:      cfg.Storage.Bucket,
+			AccessKeyID:     cfg.Storage.AccessKey,
+			SecretAccessKey: cfg.Storage.SecretKey,
+			Endpoint:        cfg.Storage.Endpoint,
+		})
+		logger.Info("Object storage initialized", "type", cfg.Storage.Type, "endpoint", cfg.Storage.Endpoint, "bucket", cfg.Storage.Bucket)
+	} else {
+		objectStore = storage.NewMemoryObjectStore()
+		logger.Info("Object storage initialized", "type", "memory")
+	}
+
 	forecastProvider := forecast.NewWeightedMovingAverageForecast()
 
 	// Service layers
@@ -50,6 +89,13 @@ func main() {
 	paymentSvc := service.NewPaymentService(repo, ledgerSvc, exitSvc, cfg.Razorpay.WebhookSecret)
 	analyticsSvc := service.NewAnalyticsService(repo, forecastProvider)
 	onboardingSvc := service.NewOnboardingService(repo)
+
+	// AI Menu Cataloging Service
+	var aiCatalogSvc *service.AICatalogService
+	if cfg.AI.GeminiAPIKey != "" {
+		aiCatalogSvc = service.NewAICatalogService(repo, objectStore, cfg.AI.GeminiAPIKey, cfg.AI.LLMModel)
+		logger.Info("Gemini AI Catalog Service initialized", "model", cfg.AI.LLMModel)
+	}
 
 	// Background worker
 	bgWorker := worker.NewWorker(repo, logger)
@@ -70,6 +116,9 @@ func main() {
 		repo,
 		cfg.Razorpay.WebhookSecret,
 	)
+	if aiCatalogSvc != nil {
+		apiHandler.SetAICatalogService(aiCatalogSvc)
+	}
 
 	router := api.NewRouter(apiHandler, repo, []byte(cfg.Auth.JWTSecret))
 

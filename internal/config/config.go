@@ -18,6 +18,7 @@ type Config struct {
 	AWS        AWSConfig
 	Worker     WorkerConfig
 	Restaurant RestaurantDefaultConfig
+	AI         AIConfig
 }
 
 type AWSConfig struct {
@@ -56,9 +57,26 @@ type RazorpayConfig struct {
 }
 
 type StorageConfig struct {
-	Type           string // "memory", "local"
+	Type           string // "memory", "local", "s3", "minio"
 	UploadDir      string
 	MaxUploadBytes int64 // e.g. 5242880 (5MB)
+	Endpoint       string
+	Region         string
+	Bucket         string
+	AccessKey      string
+	SecretKey      string
+	UseSSL         bool
+}
+
+type AIConfig struct {
+	Provider           string
+	GeminiAPIKey       string
+	OpenAIAPIKey       string
+	AWSBedrockRegion   string
+	AWSNovaModel       string
+	EmbeddingModel     string
+	EmbeddingDimension int
+	LLMModel           string
 }
 
 type WorkerConfig struct {
@@ -113,6 +131,12 @@ func Load(envFiles ...string) (*Config, error) {
 			Type:           getEnv("STORAGE_TYPE", "memory"),
 			UploadDir:      getEnv("STORAGE_UPLOAD_DIR", "./uploads"),
 			MaxUploadBytes: int64(getEnvInt("STORAGE_MAX_UPLOAD_BYTES", 5*1024*1024)), // 5MB
+			Endpoint:       getEnv("STORAGE_ENDPOINT", getEnv("AWS_S3_ENDPOINT", "")),
+			Region:         getEnv("STORAGE_REGION", getEnv("AWS_REGION", "us-east-1")),
+			Bucket:         getEnv("STORAGE_BUCKET", getEnv("AWS_S3_BUCKET_NAME", "togetherly")),
+			AccessKey:      getEnv("STORAGE_ACCESS_KEY", getEnv("AWS_ACCESS_KEY_ID", "")),
+			SecretKey:      getEnv("STORAGE_SECRET_KEY", getEnv("AWS_SECRET_ACCESS_KEY", "")),
+			UseSSL:         strings.EqualFold(getEnv("STORAGE_USE_SSL", "false"), "true"),
 		},
 		AWS: AWSConfig{
 			Region:           getEnv("AWS_REGION", "ap-south-1"),
@@ -134,6 +158,16 @@ func Load(envFiles ...string) (*Config, error) {
 			RapidOrderJumpFactor:    getEnvInt("DEFAULT_RAPID_ORDER_JUMP_FACTOR", 3),
 			ExitPassOTPTTLMinutes:   getEnvInt("DEFAULT_EXIT_PASS_OTP_TTL_MINUTES", 120),
 			FirstOrderOTPTTLMinutes: getEnvInt("DEFAULT_FIRST_ORDER_OTP_TTL_MINUTES", 15),
+		},
+		AI: AIConfig{
+			Provider:           getEnv("AI_PROVIDER", "gemini"),
+			GeminiAPIKey:       getEnv("GEMINI_API_KEY", ""),
+			OpenAIAPIKey:       getEnv("OPENAI_API_KEY", ""),
+			AWSBedrockRegion:   getEnv("AWS_BEDROCK_REGION", "us-east-1"),
+			AWSNovaModel:       getEnv("AWS_NOVA_MODEL", "amazon.nova-lite-v1:0"),
+			EmbeddingModel:     getEnv("EMBEDDING_MODEL", "text-embedding-3-small"),
+			EmbeddingDimension: getEnvInt("EMBEDDING_DIMENSION", 1536),
+			LLMModel:           getEnv("LLM_MODEL", "gemini-2.5-flash"),
 		},
 	}
 

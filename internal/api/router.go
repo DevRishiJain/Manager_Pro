@@ -24,10 +24,24 @@ func NewRouter(handler *handlers.APIHandler, repo storage.Repository, jwtSecret 
 	idempotencyMgr := middleware.NewIdempotencyManager()
 	r.Use(idempotencyMgr.Middleware())
 
+	// Health Check & Root Handlers
+	r.Get("/healthz", func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		w.WriteHeader(http.StatusOK)
+		_, _ = w.Write([]byte(`{"status":"ok","service":"table-manager-dining-os","version":"v2.0.0"}`))
+	})
+	r.Get("/", func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		w.WriteHeader(http.StatusOK)
+		_, _ = w.Write([]byte(`{"service":"Table Manager Dining OS API","docs":"/api/v1","status":"healthy"}`))
+	})
+
 	r.Route("/api/v1", func(api chi.Router) {
 		// Public routes
 		api.Post("/session/start", handler.StartSession)
 		api.Post("/webhooks/razorpay", handler.RazorpayWebhook)
+		api.Post("/public/menu/ai-catalog", handler.AICatalogMenu)
+		api.Post("/public/menu/ai-query", handler.AIQueryMenu)
 
 		// Customer session routes (Opaque session token auth)
 		api.Group(func(cr chi.Router) {
@@ -87,6 +101,8 @@ func NewRouter(handler *handlers.APIHandler, repo storage.Repository, jwtSecret 
 			tr.Post("/restaurant/menu/categories", handler.CreateCategory)
 			tr.Get("/restaurant/menu/items", handler.ListMenuItems)
 			tr.Post("/restaurant/menu/items", handler.CreateMenuItem)
+			tr.Post("/restaurant/menu/ai-catalog", handler.AICatalogMenu)
+			tr.Post("/restaurant/menu/ai-query", handler.AIQueryMenu)
 
 			// Staff Management
 			tr.Get("/restaurant/staff", handler.ListStaff)

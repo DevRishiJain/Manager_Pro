@@ -5,6 +5,7 @@ import (
 	"io"
 	"net/http"
 	"strconv"
+	"strings"
 	"time"
 
 	objstore "github.com/devrishijain/table-manager/internal/adapter/storage"
@@ -27,9 +28,14 @@ type APIHandler struct {
 	ledgerService     *service.LedgerService
 	analyticsService  *service.AnalyticsService
 	onboardingService *service.OnboardingService
+	aiCatalogService  *service.AICatalogService
 	objectStore       objstore.ObjectStore
 	repo              storage.Repository
 	webhookSecret     string
+}
+
+func (h *APIHandler) SetAICatalogService(aiSvc *service.AICatalogService) {
+	h.aiCatalogService = aiSvc
 }
 
 func NewAPIHandler(
@@ -1254,3 +1260,140 @@ func (h *APIHandler) GetOnboardingProgress(w http.ResponseWriter, r *http.Reques
 	}
 	jsonResponse(w, http.StatusOK, progress)
 }
+
+// AICatalogMenu processes an uploaded menu image with Gemini AI Vision and saves extracted categories/dishes.
+func (h *APIHandler) AICatalogMenu(w http.ResponseWriter, r *http.Request) {
+	if h.aiCatalogService == nil {
+		errorResponse(w, http.StatusServiceUnavailable, "AI catalog service is not initialized")
+		return
+	}
+
+	var restaurantID uuid.UUID
+	claims, ok := middleware.GetStaffClaimsFromContext(r.Context())
+	if ok {
+		restaurantID = claims.RestaurantID
+	} else {
+		// Allow fallback restaurant_id in query or form
+		restIDStr := r.URL.Query().Get("restaurant_id")
+		if restIDStr == "" {
+			restIDStr = r.FormValue("restaurant_id")
+		}
+		if restIDStr != "" {
+			parsedID, err := uuid.Parse(restIDStr)
+			if err == nil {
+				restaurantID = parsedID
+			}
+		}
+	}
+
+	if restaurantID == uuid.Nil {
+		errorResponse(w, http.StatusBadRequest, "restaurant_id is required")
+		return
+	}
+
+	// Parse file from multipart form
+	err := r.ParseMultipartForm(10 << 20) // 10 MB max
+	if err != nil {
+		errorResponse(w, http.StatusBadRequest, "failed to parse multipart form: "+err.Error())
+		return
+	}
+
+	file, header, err := r.FormFile("menu_image")
+	if err != nil {
+		file, header, err = r.FormFile("file")
+		if err != nil {
+			errorResponse(w, http.StatusBadRequest, "menu_image form file is required")
+			return
+		}
+	}
+	defer file.Close()
+
+	fileBytes, err := io.ReadAll(file)
+	if err != nil {
+		errorResponse(w, http.StatusInternalServerError, "failed to read uploaded file: "+err.Error())
+		return
+	}
+
+	mimeType := header.Header.Get("Content-Type")
+	if mimeType == "" {
+		mimeType = "image/jpeg"
+	}
+
+	result, err := h.aiCatalogService.ProcessAndCatalogMenu(r.Context(), restaurantID, fileBytes, mimeType)
+	if err != nil {
+		errorResponse(w, http.StatusInternalServerError, "AI menu extraction failed: "+err.Error())
+		return
+	}
+
+	jsonResponse(w, http.StatusOK, map[string]interface{}{
+		"status":        "success",
+		"message":       "Menu cataloged successfully via Gemini AI",
+		"restaurant_id": restaurantID,
+		"catalog":       result,
+	})
+}
+
+// AIQueryMenu handles natural language questions and semantic data retrieval over stored menu items using Gemini AI.
+func (h *APIHandler) AIQueryMenu(w http.ResponseWriter, r *http.Request) {
+	if h.aiCatalogService == nil {
+		errorResponse(w, http.StatusServiceUnavailable, "AI service is not initialized")
+		return
+	}
+
+	var restaurantID uuid.UUID
+	claims, ok := middleware.GetStaffClaimsFromContext(r.Context())
+	if ok {
+		restaurantID = claims.RestaurantID
+	}
+
+	var req struct {
+		RestaurantID string `json:"restaurant_id"`
+		Query        string `json:"query"`
+	}
+
+	if r.Header.Get("Content-Type") == "application/json" {
+		_ = json.NewDecoder(r.Body).Decode(&req)
+	}
+
+	if restaurantID == uuid.Nil && req.RestaurantID != "" {
+		if parsed, err := uuid.Parse(req.RestaurantID); err == nil {
+			restaurantID = parsed
+		}
+	}
+	if restaurantID == uuid.Nil {
+		if queryRestID := r.URL.Query().Get("restaurant_id"); queryRestID != "" {
+			if parsed, err := uuid.Parse(queryRestID); err == nil {
+				restaurantID = parsed
+			}
+		}
+	}
+
+	userQuery := req.Query
+	if userQuery == "" {
+		userQuery = r.URL.Query().Get("query")
+	}
+
+	if restaurantID == uuid.Nil {
+		errorResponse(w, http.StatusBadRequest, "restaurant_id is required")
+		return
+	}
+
+	if strings.TrimSpace(userQuery) == "" {
+		errorResponse(w, http.StatusBadRequest, "query is required")
+		return
+	}
+
+	result, err := h.aiCatalogService.QueryMenuWithAI(r.Context(), restaurantID, userQuery)
+	if err != nil {
+		errorResponse(w, http.StatusInternalServerError, "AI data retrieval failed: "+err.Error())
+		return
+	}
+
+	jsonResponse(w, http.StatusOK, map[string]interface{}{
+		"status":        "success",
+		"restaurant_id": restaurantID,
+		"retrieval":     result,
+	})
+}
+
+
