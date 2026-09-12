@@ -82,12 +82,13 @@ func (s *AICatalogService) ProcessAndCatalogMenu(ctx context.Context, restaurant
 		mimeType = http.DetectContentType(imageData)
 	}
 
-	// 1. Store menu image proof in Object Store
+	// 1. Store menu image in Object Store under 'menus/' folder
 	var imageURL string
-	stored, err := s.objectStore.UploadProof(ctx, restaurantID, uuid.New(), imageData)
+	stored, err := s.objectStore.UploadMenuImage(ctx, restaurantID, uuid.New(), imageData)
 	if err == nil && stored != nil {
 		imageURL = stored.URL
 	}
+
 
 	// 2. Execute Gemini Vision OCR & Extraction
 	extracted, err := s.extractWithGemini(ctx, imageData, mimeType)

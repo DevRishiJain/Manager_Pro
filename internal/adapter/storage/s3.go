@@ -49,10 +49,11 @@ func (s *S3ObjectStore) UploadProof(ctx context.Context, restaurantID, paymentID
 	return s.uploadFile(ctx, "payment-proofs", restaurantID, paymentID.String(), data)
 }
 
-// UploadMenuImage uploads menu item photographs to AWS S3.
+// UploadMenuImage uploads menu photographs to AWS S3 / MinIO.
 func (s *S3ObjectStore) UploadMenuImage(ctx context.Context, restaurantID, itemID uuid.UUID, data []byte) (*StoredFile, error) {
-	return s.uploadFile(ctx, "menu-items", restaurantID, itemID.String(), data)
+	return s.uploadFile(ctx, "menus", restaurantID, itemID.String(), data)
 }
+
 
 func (s *S3ObjectStore) uploadFile(ctx context.Context, folder string, restaurantID uuid.UUID, entityID string, data []byte) (*StoredFile, error) {
 	if int64(len(data)) > MaxFileSize {

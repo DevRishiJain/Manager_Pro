@@ -36,6 +36,7 @@ type StoredFile struct {
 
 type ObjectStore interface {
 	UploadProof(ctx context.Context, restaurantID, paymentID uuid.UUID, data []byte) (*StoredFile, error)
+	UploadMenuImage(ctx context.Context, restaurantID, itemID uuid.UUID, data []byte) (*StoredFile, error)
 	GetSignedURL(ctx context.Context, key string, ttl time.Duration) (string, error)
 }
 
@@ -52,7 +53,12 @@ func NewMemoryObjectStore() *MemoryObjectStore {
 	}
 }
 
+func (s *MemoryObjectStore) UploadMenuImage(ctx context.Context, restaurantID, itemID uuid.UUID, data []byte) (*StoredFile, error) {
+	return s.UploadProof(ctx, restaurantID, itemID, data)
+}
+
 func (s *MemoryObjectStore) UploadProof(ctx context.Context, restaurantID, paymentID uuid.UUID, data []byte) (*StoredFile, error) {
+
 	if int64(len(data)) > MaxFileSize {
 		return nil, ErrFileTooLarge
 	}
