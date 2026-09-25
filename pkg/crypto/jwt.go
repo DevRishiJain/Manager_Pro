@@ -15,6 +15,8 @@ var (
 type StaffClaims struct {
 	StaffID      uuid.UUID `json:"staff_id"`
 	RestaurantID uuid.UUID `json:"restaurant_id"`
+	EmployeeID   string    `json:"employee_id,omitempty"`
+	Name         string    `json:"name,omitempty"`
 	Role         string    `json:"role"`
 	IsPlatform   bool      `json:"is_platform"`
 	jwt.RegisteredClaims
@@ -28,9 +30,16 @@ type GuardClaims struct {
 
 // GenerateStaffJWT creates a signed JWT for staff or platform admin users.
 func GenerateStaffJWT(secret []byte, staffID, restaurantID uuid.UUID, role string, isPlatform bool, ttl time.Duration) (string, error) {
+	return GenerateFullStaffJWT(secret, staffID, restaurantID, "", "", role, isPlatform, ttl)
+}
+
+// GenerateFullStaffJWT creates a signed JWT with full employee profile claims.
+func GenerateFullStaffJWT(secret []byte, staffID, restaurantID uuid.UUID, employeeID, name, role string, isPlatform bool, ttl time.Duration) (string, error) {
 	claims := StaffClaims{
 		StaffID:      staffID,
 		RestaurantID: restaurantID,
+		EmployeeID:   employeeID,
+		Name:         name,
 		Role:         role,
 		IsPlatform:   isPlatform,
 		RegisteredClaims: jwt.RegisteredClaims{

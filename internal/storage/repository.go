@@ -65,6 +65,7 @@ type Repository interface {
 	GetOrdersBySessionID(ctx context.Context, sessionID uuid.UUID) ([]order.Order, error)
 	UpdateOrder(ctx context.Context, o *order.Order) error
 	ListKitchenQueue(ctx context.Context, restaurantID uuid.UUID, statuses []order.State) ([]order.Order, error)
+	ListPendingOrders(ctx context.Context, restaurantID uuid.UUID) ([]order.Order, error)
 
 	// Payment
 	CreatePayment(ctx context.Context, p *payment.Payment) error
@@ -104,6 +105,7 @@ type Repository interface {
 	CreateStaff(ctx context.Context, s *restaurant.StaffUser) error
 	GetStaffByID(ctx context.Context, id uuid.UUID) (*restaurant.StaffUser, error)
 	GetStaffByEmail(ctx context.Context, email string) (*restaurant.StaffUser, error)
+	GetStaffByEmployeeID(ctx context.Context, restaurantID uuid.UUID, employeeID string) (*restaurant.StaffUser, error)
 	ListStaff(ctx context.Context, restaurantID uuid.UUID) ([]restaurant.StaffUser, error)
 
 	CreateGuard(ctx context.Context, g *restaurant.GuardUser) error

@@ -86,6 +86,7 @@ type Order struct {
 	SessionID                uuid.UUID          `json:"session_id"`
 	RestaurantID             uuid.UUID          `json:"restaurant_id"`
 	SequenceNumber           int                `json:"sequence_number"`
+	TableNumber              string             `json:"table_number,omitempty"`
 	Status                   State              `json:"status"`
 	PlacedAt                 time.Time          `json:"placed_at"`
 	AcceptedAt               *time.Time         `json:"accepted_at,omitempty"`
@@ -95,31 +96,31 @@ type Order struct {
 	Total                    money.Money        `json:"total"`
 	CancelledAt              *time.Time         `json:"cancelled_at,omitempty"`
 	CancellationStage        *CancellationStage `json:"cancellation_stage,omitempty"`
-	CancellationFeeApplicable bool              `json:"cancellation_fee_applicable"`
+	CancellationFeeApplicable bool              `json:"cancellation_fee_applicable,omitempty"`
 	Items                    []OrderItem        `json:"items,omitempty"`
-	Version                  int                `json:"version"`
-	CreatedAt                time.Time          `json:"created_at"`
-	UpdatedAt                time.Time          `json:"updated_at"`
+	Version                  int                `json:"version,omitempty"`
+	CreatedAt                time.Time          `json:"created_at,omitempty"`
+	UpdatedAt                time.Time          `json:"updated_at,omitempty"`
 }
 
 // OrderItem represents a complete price and tax snapshot at order submission time.
 // Once created, menu price changes never affect historical OrderItems.
 type OrderItem struct {
 	ID                  uuid.UUID   `json:"id"`
-	OrderID             uuid.UUID   `json:"order_id"`
-	MenuItemID          uuid.UUID   `json:"menu_item_id"`
+	OrderID             uuid.UUID   `json:"order_id,omitempty"`
+	MenuItemID          uuid.UUID   `json:"menu_item_id,omitempty"`
 	VariantID           *uuid.UUID  `json:"variant_id,omitempty"`
 	ItemNameSnapshot    string      `json:"item_name_snapshot"`
 	Quantity            int         `json:"quantity"`
 	UnitPriceSnapshot   money.Money `json:"unit_price_snapshot"`
 	LineTotal           money.Money `json:"line_total"`
-	HSNSACCodeSnapshot  string      `json:"hsn_sac_code_snapshot"`  // e.g. "996331"
-	CGSTRateBpsSnapshot int64       `json:"cgst_rate_bps_snapshot"` // Basis points, e.g. 250 for 2.5%
-	SGSTRateBpsSnapshot int64       `json:"sgst_rate_bps_snapshot"` // Basis points, e.g. 250 for 2.5%
-	CGSTAmount          money.Money `json:"cgst_amount"`
-	SGSTAmount          money.Money `json:"sgst_amount"`
+	HSNSACCodeSnapshot  string      `json:"hsn_sac_code_snapshot,omitempty"`  // e.g. "996331"
+	CGSTRateBpsSnapshot int64       `json:"cgst_rate_bps_snapshot,omitempty"` // Basis points, e.g. 250 for 2.5%
+	SGSTRateBpsSnapshot int64       `json:"sgst_rate_bps_snapshot,omitempty"` // Basis points, e.g. 250 for 2.5%
+	CGSTAmount          money.Money `json:"cgst_amount,omitempty"`
+	SGSTAmount          money.Money `json:"sgst_amount,omitempty"`
 	SpecialInstructions string      `json:"special_instructions,omitempty"`
-	CreatedAt           time.Time   `json:"created_at"`
+	CreatedAt           time.Time   `json:"created_at,omitempty"`
 }
 
 // CartItem is an ephemeral client submission payload for ordering.

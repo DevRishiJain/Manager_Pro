@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"sort"
 	"sync"
 	"time"
 
@@ -31,9 +32,10 @@ type MemoryRepository struct {
 	restaurants   map[uuid.UUID]*restaurant.Restaurant
 	tables        map[uuid.UUID]*restaurant.Table
 	tablesByToken map[string]*restaurant.Table
-	staff         map[uuid.UUID]*restaurant.StaffUser
-	staffByEmail  map[string]*restaurant.StaffUser
-	guards        map[uuid.UUID]*restaurant.GuardUser
+	staff             map[uuid.UUID]*restaurant.StaffUser
+	staffByEmail      map[string]*restaurant.StaffUser
+	staffByEmployeeID map[string]*restaurant.StaffUser
+	guards            map[uuid.UUID]*restaurant.GuardUser
 	guardsByPhone map[string]*restaurant.GuardUser
 
 	categories map[uuid.UUID]*restaurant.MenuCategory
@@ -75,6 +77,7 @@ func NewMemoryRepository() *MemoryRepository {
 		tablesByToken:     make(map[string]*restaurant.Table),
 		staff:             make(map[uuid.UUID]*restaurant.StaffUser),
 		staffByEmail:      make(map[string]*restaurant.StaffUser),
+		staffByEmployeeID: make(map[string]*restaurant.StaffUser),
 		guards:            make(map[uuid.UUID]*restaurant.GuardUser),
 		guardsByPhone:     make(map[string]*restaurant.GuardUser),
 		categories:        make(map[uuid.UUID]*restaurant.MenuCategory),
@@ -286,12 +289,40 @@ func (m *MemoryRepository) ListKitchenQueue(ctx context.Context, restaurantID uu
 
 	var res []order.Order
 	for _, o := range m.orders {
-		if o.RestaurantID == restaurantID && statusMap[o.Status] {
+		if o.RestaurantID == restaurantID && statusMap[o.Status] && time.Since(o.PlacedAt) <= 12*time.Hour {
 			cpy := *o
 			cpy.Items = m.orderItems[o.ID]
+			if sess, exists := m.sessions[o.SessionID]; exists {
+				if tbl, tblExists := m.tables[sess.TableID]; tblExists {
+					cpy.TableNumber = tbl.TableNumber
+				}
+			}
 			res = append(res, cpy)
 		}
 	}
+	return res, nil
+}
+
+func (m *MemoryRepository) ListPendingOrders(ctx context.Context, restaurantID uuid.UUID) ([]order.Order, error) {
+	m.mu.RLock()
+	defer m.mu.RUnlock()
+
+	var res []order.Order
+	for _, o := range m.orders {
+		if o.RestaurantID == restaurantID && (o.Status == order.StatePlacedUnverified || o.Status == order.StatePlacedVerified) && time.Since(o.PlacedAt) <= 12*time.Hour {
+			cpy := *o
+			cpy.Items = m.orderItems[o.ID]
+			if sess, exists := m.sessions[o.SessionID]; exists {
+				if tbl, tblExists := m.tables[sess.TableID]; tblExists {
+					cpy.TableNumber = tbl.TableNumber
+				}
+			}
+			res = append(res, cpy)
+		}
+	}
+	sort.Slice(res, func(i, j int) bool {
+		return res[i].PlacedAt.Before(res[j].PlacedAt)
+	})
 	return res, nil
 }
 
@@ -624,6 +655,9 @@ func (m *MemoryRepository) CreateStaff(ctx context.Context, s *restaurant.StaffU
 	cpy := *s
 	m.staff[s.ID] = &cpy
 	m.staffByEmail[s.Email] = &cpy
+	if s.EmployeeID != "" {
+		m.staffByEmployeeID[s.RestaurantID.String()+":"+s.EmployeeID] = &cpy
+	}
 	return nil
 }
 
@@ -649,6 +683,24 @@ func (m *MemoryRepository) GetStaffByEmail(ctx context.Context, email string) (*
 	}
 	cpy := *s
 	return &cpy, nil
+}
+
+func (m *MemoryRepository) GetStaffByEmployeeID(ctx context.Context, restaurantID uuid.UUID, employeeID string) (*restaurant.StaffUser, error) {
+	m.mu.RLock()
+	defer m.mu.RUnlock()
+
+	key := restaurantID.String() + ":" + employeeID
+	if s, ok := m.staffByEmployeeID[key]; ok {
+		cpy := *s
+		return &cpy, nil
+	}
+	for _, st := range m.staff {
+		if st.RestaurantID == restaurantID && st.EmployeeID == employeeID {
+			cpy := *st
+			return &cpy, nil
+		}
+	}
+	return nil, ErrNotFound
 }
 
 func (m *MemoryRepository) ListStaff(ctx context.Context, restaurantID uuid.UUID) ([]restaurant.StaffUser, error) {

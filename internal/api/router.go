@@ -39,6 +39,8 @@ func NewRouter(handler *handlers.APIHandler, repo storage.Repository, jwtSecret 
 	r.Route("/api/v1", func(api chi.Router) {
 		// Public routes
 		api.Post("/session/start", handler.StartSession)
+		api.Post("/staff/login", handler.StaffLogin)
+		api.Post("/auth/staff/login", handler.StaffLogin)
 		api.Post("/webhooks/razorpay", handler.RazorpayWebhook)
 		api.Post("/public/menu/ai-catalog", handler.AICatalogMenu)
 		api.Post("/public/menu/ai-query", handler.AIQueryMenu)
@@ -56,6 +58,7 @@ func NewRouter(handler *handlers.APIHandler, repo storage.Repository, jwtSecret 
 		api.Group(func(sr chi.Router) {
 			sr.Use(middleware.StaffAuth(jwtSecret))
 			sr.Post("/staff/sessions/{id}/verify-first-order", handler.VerifyFirstOrder)
+			sr.Get("/staff/orders/pending", handler.GetPendingOrders)
 			sr.Post("/staff/orders/{id}/accept", handler.AcceptOrder)
 			sr.Post("/staff/payments/{id}/confirm", handler.StaffConfirmPayment)
 			sr.Post("/staff/payments/confirm", handler.StaffConfirmPayment)
@@ -106,6 +109,7 @@ func NewRouter(handler *handlers.APIHandler, repo storage.Repository, jwtSecret 
 
 			// Staff Management
 			tr.Get("/restaurant/staff", handler.ListStaff)
+			tr.Post("/restaurant/staff", handler.CreateStaff)
 
 			// Settings & Onboarding
 			tr.Get("/restaurant/settings", handler.GetSettings)

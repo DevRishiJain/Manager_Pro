@@ -169,11 +169,17 @@ func (s *OrderService) PlaceOrder(ctx context.Context, sessionID uuid.UUID, cart
 		initialOrderStatus = order.StatePlacedVerified
 	}
 
+	tableNumber := "Table"
+	if tbl, err := s.repo.GetTableByID(ctx, sess.TableID); err == nil && tbl != nil && tbl.TableNumber != "" {
+		tableNumber = tbl.TableNumber
+	}
+
 	newOrder := &order.Order{
 		ID:                       orderID,
 		SessionID:                sessionID,
 		RestaurantID:             sess.RestaurantID,
 		SequenceNumber:           sequenceNum,
+		TableNumber:              tableNumber,
 		Status:                   initialOrderStatus,
 		PlacedAt:                 now,
 		Subtotal:                 money.New(subtotalMinor),
@@ -259,6 +265,17 @@ func (s *OrderService) AcceptOrder(ctx context.Context, orderID, staffID uuid.UU
 		SessionID:    &ord.SessionID,
 		Action:       "ORDER_ACCEPTED",
 		AfterState:   orderBytes,
+		CreatedAt:    now,
+	})
+
+	_ = s.repo.AppendStaffAction(ctx, &audit.StaffAction{
+		ID:           uuid.New(),
+		StaffID:      staffID,
+		RestaurantID: ord.RestaurantID,
+		SessionID:    &ord.SessionID,
+		ActionType:   "ORDER_ACCEPTED",
+		Reason:       fmt.Sprintf("Order #%d accepted by waiter", ord.SequenceNumber),
+		Metadata:     orderBytes,
 		CreatedAt:    now,
 	})
 
@@ -374,3 +391,8 @@ func (s *OrderService) ListKitchenQueue(ctx context.Context, restaurantID uuid.U
 	statuses := []order.State{order.StateAccepted, order.StatePreparing}
 	return s.repo.ListKitchenQueue(ctx, restaurantID, statuses)
 }
+
+func (s *OrderService) ListPendingOrders(ctx context.Context, restaurantID uuid.UUID) ([]order.Order, error) {
+	return s.repo.ListPendingOrders(ctx, restaurantID)
+}
+

@@ -2,6 +2,7 @@ package postgres
 
 import (
 	"context"
+	"encoding/json"
 	"time"
 
 	"github.com/devrishijain/table-manager/internal/domain/audit"
@@ -173,11 +174,44 @@ func (r *PostgresRepository) CreateOrder(ctx context.Context, o *order.Order, it
 		if placedAt.IsZero() {
 			placedAt = time.Now().UTC()
 		}
+		tableNum := o.TableNumber
+		if tableNum == "" {
+			tableNum = "Table"
+		}
+
+		type compactItem struct {
+			ID                  uuid.UUID `json:"id"`
+			MenuItemID          uuid.UUID `json:"menu_item_id"`
+			ItemNameSnapshot    string    `json:"item_name_snapshot"`
+			Quantity            int       `json:"quantity"`
+			UnitPriceMinor      int64     `json:"unit_price_minor"`
+			LineTotalMinor      int64     `json:"line_total_minor"`
+			SpecialInstructions string    `json:"special_instructions,omitempty"`
+		}
+		compactItems := make([]compactItem, len(items))
+		for i, it := range items {
+			compactItems[i] = compactItem{
+				ID:                  it.ID,
+				MenuItemID:          it.MenuItemID,
+				ItemNameSnapshot:    it.ItemNameSnapshot,
+				Quantity:            it.Quantity,
+				UnitPriceMinor:      it.UnitPriceSnapshot.AmountMinorUnits,
+				LineTotalMinor:      it.LineTotal.AmountMinorUnits,
+				SpecialInstructions: it.SpecialInstructions,
+			}
+		}
+		summaryJSON, _ := json.Marshal(compactItems)
+
 		_, err := r.pool.Exec(ctx, `
-			INSERT INTO orders (id, session_id, restaurant_id, sequence_number, status, placed_at, subtotal_minor, tax_total_minor, total_minor, currency, cancellation_fee_applicable, version, created_at, updated_at)
-			VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14)
+			INSERT INTO orders (
+				id, session_id, restaurant_id, sequence_number, status, placed_at, 
+				subtotal_minor, tax_total_minor, total_minor, currency, 
+				cancellation_fee_applicable, version, created_at, updated_at,
+				table_number, items_summary
+			)
+			VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16)
 			ON CONFLICT (id) DO NOTHING;
-		`, o.ID, o.SessionID, o.RestaurantID, o.SequenceNumber, string(o.Status), placedAt, o.Subtotal.AmountMinorUnits, o.TaxTotal.AmountMinorUnits, o.Total.AmountMinorUnits, curr, o.CancellationFeeApplicable, o.Version, o.CreatedAt, o.UpdatedAt)
+		`, o.ID, o.SessionID, o.RestaurantID, o.SequenceNumber, string(o.Status), placedAt, o.Subtotal.AmountMinorUnits, o.TaxTotal.AmountMinorUnits, o.Total.AmountMinorUnits, curr, o.CancellationFeeApplicable, o.Version, o.CreatedAt, o.UpdatedAt, tableNum, summaryJSON)
 		if err != nil {
 			return err
 		}
@@ -261,18 +295,79 @@ func (r *PostgresRepository) GetOrderByID(ctx context.Context, id uuid.UUID) (*o
 func (r *PostgresRepository) GetOrdersBySessionID(ctx context.Context, sessionID uuid.UUID) ([]order.Order, error) {
 	if r.pool != nil {
 		rows, err := r.pool.Query(ctx, `
-			SELECT id FROM orders WHERE session_id = $1 ORDER BY sequence_number ASC;
+			SELECT 
+				o.id,
+				o.session_id,
+				o.restaurant_id,
+				o.sequence_number,
+				o.status,
+				o.placed_at,
+				o.accepted_at,
+				o.accepted_by_staff_id,
+				o.subtotal_minor,
+				o.tax_total_minor,
+				o.total_minor,
+				o.version,
+				COALESCE(o.items_summary, '[]'::jsonb) AS items_json
+			FROM orders o
+			WHERE o.session_id = $1
+			ORDER BY o.sequence_number ASC;
 		`, sessionID)
 		if err == nil {
 			defer rows.Close()
 			var orders []order.Order
 			for rows.Next() {
-				var oid uuid.UUID
-				if scanErr := rows.Scan(&oid); scanErr == nil {
-					ord, ordErr := r.GetOrderByID(ctx, oid)
-					if ordErr == nil && ord != nil {
-						orders = append(orders, *ord)
+				var o order.Order
+				var subMinor, taxMinor, totMinor int64
+				var statusStr string
+				var itemsJSON []byte
+
+				if err := rows.Scan(
+					&o.ID,
+					&o.SessionID,
+					&o.RestaurantID,
+					&o.SequenceNumber,
+					&statusStr,
+					&o.PlacedAt,
+					&o.AcceptedAt,
+					&o.AcceptedByStaffID,
+					&subMinor,
+					&taxMinor,
+					&totMinor,
+					&o.Version,
+					&itemsJSON,
+				); err == nil {
+					o.Status = order.State(statusStr)
+					o.Subtotal = money.New(subMinor)
+					o.TaxTotal = money.New(taxMinor)
+					o.Total = money.New(totMinor)
+
+					type rawItem struct {
+						ID                  uuid.UUID `json:"id"`
+						OrderID             uuid.UUID `json:"order_id"`
+						MenuItemID          uuid.UUID `json:"menu_item_id"`
+						ItemNameSnapshot    string    `json:"item_name_snapshot"`
+						Quantity            int       `json:"quantity"`
+						UnitPriceMinor      int64     `json:"unit_price_minor"`
+						LineTotalMinor      int64     `json:"line_total_minor"`
+						SpecialInstructions string    `json:"special_instructions"`
 					}
+					var rawItems []rawItem
+					if err := json.Unmarshal(itemsJSON, &rawItems); err == nil {
+						for _, it := range rawItems {
+							o.Items = append(o.Items, order.OrderItem{
+								ID:                  it.ID,
+								OrderID:             it.OrderID,
+								MenuItemID:          it.MenuItemID,
+								ItemNameSnapshot:    it.ItemNameSnapshot,
+								Quantity:            it.Quantity,
+								UnitPriceSnapshot:   money.New(it.UnitPriceMinor),
+								LineTotal:           money.New(it.LineTotalMinor),
+								SpecialInstructions: it.SpecialInstructions,
+							})
+						}
+					}
+					orders = append(orders, o)
 				}
 			}
 			if len(orders) > 0 {
@@ -302,24 +397,175 @@ func (r *PostgresRepository) ListKitchenQueue(ctx context.Context, restaurantID 
 			statusStrs[i] = string(s)
 		}
 		rows, err := r.pool.Query(ctx, `
-			SELECT id FROM orders WHERE restaurant_id = $1 AND status = ANY($2) ORDER BY sequence_number ASC;
+			SELECT 
+				o.id,
+				o.session_id,
+				o.restaurant_id,
+				o.sequence_number,
+				o.status,
+				o.placed_at,
+				o.accepted_at,
+				o.accepted_by_staff_id,
+				o.subtotal_minor,
+				o.tax_total_minor,
+				o.total_minor,
+				o.version,
+				COALESCE(NULLIF(o.table_number, ''), 'Table') AS table_number,
+				COALESCE(o.items_summary, '[]'::jsonb) AS items_json
+			FROM orders o
+			WHERE o.restaurant_id = $1 
+			  AND o.status = ANY($2)
+			  AND o.placed_at >= NOW() - INTERVAL '12 hours'
+			ORDER BY o.sequence_number ASC
+			LIMIT 100;
 		`, restaurantID, statusStrs)
 		if err == nil {
 			defer rows.Close()
 			var orders []order.Order
 			for rows.Next() {
-				var oid uuid.UUID
-				if scanErr := rows.Scan(&oid); scanErr == nil {
-					ord, ordErr := r.GetOrderByID(ctx, oid)
-					if ordErr == nil && ord != nil {
-						orders = append(orders, *ord)
+				var o order.Order
+				var subMinor, taxMinor, totMinor int64
+				var statusStr string
+				var itemsJSON []byte
+
+				if err := rows.Scan(
+					&o.ID,
+					&o.SessionID,
+					&o.RestaurantID,
+					&o.SequenceNumber,
+					&statusStr,
+					&o.PlacedAt,
+					&o.AcceptedAt,
+					&o.AcceptedByStaffID,
+					&subMinor,
+					&taxMinor,
+					&totMinor,
+					&o.Version,
+					&o.TableNumber,
+					&itemsJSON,
+				); err == nil {
+					o.Status = order.State(statusStr)
+					o.Subtotal = money.New(subMinor)
+					o.TaxTotal = money.New(taxMinor)
+					o.Total = money.New(totMinor)
+
+					type rawItem struct {
+						ID                  uuid.UUID `json:"id"`
+						OrderID             uuid.UUID `json:"order_id"`
+						MenuItemID          uuid.UUID `json:"menu_item_id"`
+						ItemNameSnapshot    string    `json:"item_name_snapshot"`
+						Quantity            int       `json:"quantity"`
+						UnitPriceMinor      int64     `json:"unit_price_minor"`
+						LineTotalMinor      int64     `json:"line_total_minor"`
+						SpecialInstructions string    `json:"special_instructions"`
 					}
+					var rawItems []rawItem
+					if err := json.Unmarshal(itemsJSON, &rawItems); err == nil {
+						for _, it := range rawItems {
+							o.Items = append(o.Items, order.OrderItem{
+								ID:                  it.ID,
+								OrderID:             it.OrderID,
+								MenuItemID:          it.MenuItemID,
+								ItemNameSnapshot:    it.ItemNameSnapshot,
+								Quantity:            it.Quantity,
+								UnitPriceSnapshot:   money.New(it.UnitPriceMinor),
+								LineTotal:           money.New(it.LineTotalMinor),
+								SpecialInstructions: it.SpecialInstructions,
+							})
+						}
+					}
+					orders = append(orders, o)
 				}
 			}
 			return orders, nil
 		}
 	}
 	return r.mem.ListKitchenQueue(ctx, restaurantID, statuses)
+}
+
+func (r *PostgresRepository) ListPendingOrders(ctx context.Context, restaurantID uuid.UUID) ([]order.Order, error) {
+	if r.pool != nil {
+		rows, err := r.pool.Query(ctx, `
+			SELECT 
+				o.id,
+				o.session_id,
+				o.restaurant_id,
+				o.sequence_number,
+				o.status,
+				o.placed_at,
+				o.subtotal_minor,
+				o.tax_total_minor,
+				o.total_minor,
+				o.version,
+				COALESCE(NULLIF(o.table_number, ''), 'Table') AS table_number,
+				COALESCE(o.items_summary, '[]'::jsonb) AS items_json
+			FROM orders o
+			WHERE o.restaurant_id = $1 
+			  AND o.status IN ('PLACED_UNVERIFIED', 'PLACED_VERIFIED')
+			  AND o.placed_at >= NOW() - INTERVAL '12 hours'
+			ORDER BY o.placed_at ASC
+			LIMIT 100;
+		`, restaurantID)
+		if err == nil {
+			defer rows.Close()
+			var orders []order.Order
+			for rows.Next() {
+				var o order.Order
+				var subMinor, taxMinor, totMinor int64
+				var statusStr string
+				var itemsJSON []byte
+
+				if err := rows.Scan(
+					&o.ID,
+					&o.SessionID,
+					&o.RestaurantID,
+					&o.SequenceNumber,
+					&statusStr,
+					&o.PlacedAt,
+					&subMinor,
+					&taxMinor,
+					&totMinor,
+					&o.Version,
+					&o.TableNumber,
+					&itemsJSON,
+				); err == nil {
+					o.Status = order.State(statusStr)
+					o.Subtotal = money.New(subMinor)
+					o.TaxTotal = money.New(taxMinor)
+					o.Total = money.New(totMinor)
+
+					type rawItem struct {
+						ID                  uuid.UUID `json:"id"`
+						OrderID             uuid.UUID `json:"order_id"`
+						MenuItemID          uuid.UUID `json:"menu_item_id"`
+						ItemNameSnapshot    string    `json:"item_name_snapshot"`
+						Quantity            int       `json:"quantity"`
+						UnitPriceMinor      int64     `json:"unit_price_minor"`
+						LineTotalMinor      int64     `json:"line_total_minor"`
+						SpecialInstructions string    `json:"special_instructions"`
+					}
+					var rawItems []rawItem
+					if err := json.Unmarshal(itemsJSON, &rawItems); err == nil {
+						for _, it := range rawItems {
+							o.Items = append(o.Items, order.OrderItem{
+								ID:                  it.ID,
+								OrderID:             it.OrderID,
+								MenuItemID:          it.MenuItemID,
+								ItemNameSnapshot:    it.ItemNameSnapshot,
+								Quantity:            it.Quantity,
+								UnitPriceSnapshot:   money.New(it.UnitPriceMinor),
+								LineTotal:           money.New(it.LineTotalMinor),
+								SpecialInstructions: it.SpecialInstructions,
+							})
+						}
+					}
+					orders = append(orders, o)
+				}
+			}
+			return orders, nil
+		}
+	}
+	return r.mem.ListPendingOrders(ctx, restaurantID)
 }
 
 // ---------------- Payment ----------------
@@ -596,10 +842,10 @@ func (r *PostgresRepository) CreateStaff(ctx context.Context, s *restaurant.Staf
 	_ = r.mem.CreateStaff(ctx, s)
 	if r.pool != nil {
 		_, err := r.pool.Exec(ctx, `
-			INSERT INTO staff_users (id, restaurant_id, name, phone, email, password_hash, role, is_active, created_at, updated_at)
-			VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10)
-			ON CONFLICT (id) DO UPDATE SET is_active = EXCLUDED.is_active, updated_at = EXCLUDED.updated_at;
-		`, s.ID, s.RestaurantID, s.Name, s.Phone, s.Email, s.PasswordHash, string(s.Role), s.IsActive, s.CreatedAt, s.UpdatedAt)
+			INSERT INTO staff_users (id, restaurant_id, employee_id, name, phone, email, password_hash, role, is_active, created_at, updated_at)
+			VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11)
+			ON CONFLICT (id) DO UPDATE SET employee_id = EXCLUDED.employee_id, is_active = EXCLUDED.is_active, updated_at = EXCLUDED.updated_at;
+		`, s.ID, s.RestaurantID, s.EmployeeID, s.Name, s.Phone, s.Email, s.PasswordHash, string(s.Role), s.IsActive, s.CreatedAt, s.UpdatedAt)
 		if err != nil {
 			return err
 		}
@@ -612,10 +858,10 @@ func (r *PostgresRepository) GetStaffByID(ctx context.Context, id uuid.UUID) (*r
 		var s restaurant.StaffUser
 		var roleStr string
 		err := r.pool.QueryRow(ctx, `
-			SELECT id, restaurant_id, name, phone, email, password_hash, role, is_active, created_at, updated_at
+			SELECT id, restaurant_id, COALESCE(employee_id, ''), name, phone, email, password_hash, role, is_active, created_at, updated_at
 			FROM staff_users
 			WHERE id = $1;
-		`, id).Scan(&s.ID, &s.RestaurantID, &s.Name, &s.Phone, &s.Email, &s.PasswordHash, &roleStr, &s.IsActive, &s.CreatedAt, &s.UpdatedAt)
+		`, id).Scan(&s.ID, &s.RestaurantID, &s.EmployeeID, &s.Name, &s.Phone, &s.Email, &s.PasswordHash, &roleStr, &s.IsActive, &s.CreatedAt, &s.UpdatedAt)
 		if err == nil {
 			s.Role = restaurant.Role(roleStr)
 			return &s, nil
@@ -629,10 +875,10 @@ func (r *PostgresRepository) GetStaffByEmail(ctx context.Context, email string) 
 		var s restaurant.StaffUser
 		var roleStr string
 		err := r.pool.QueryRow(ctx, `
-			SELECT id, restaurant_id, name, phone, email, password_hash, role, is_active, created_at, updated_at
+			SELECT id, restaurant_id, COALESCE(employee_id, ''), name, phone, email, password_hash, role, is_active, created_at, updated_at
 			FROM staff_users
 			WHERE email = $1;
-		`, email).Scan(&s.ID, &s.RestaurantID, &s.Name, &s.Phone, &s.Email, &s.PasswordHash, &roleStr, &s.IsActive, &s.CreatedAt, &s.UpdatedAt)
+		`, email).Scan(&s.ID, &s.RestaurantID, &s.EmployeeID, &s.Name, &s.Phone, &s.Email, &s.PasswordHash, &roleStr, &s.IsActive, &s.CreatedAt, &s.UpdatedAt)
 		if err == nil {
 			s.Role = restaurant.Role(roleStr)
 			return &s, nil
@@ -641,7 +887,45 @@ func (r *PostgresRepository) GetStaffByEmail(ctx context.Context, email string) 
 	return r.mem.GetStaffByEmail(ctx, email)
 }
 
+func (r *PostgresRepository) GetStaffByEmployeeID(ctx context.Context, restaurantID uuid.UUID, employeeID string) (*restaurant.StaffUser, error) {
+	if r.pool != nil {
+		var s restaurant.StaffUser
+		var roleStr string
+		err := r.pool.QueryRow(ctx, `
+			SELECT id, restaurant_id, COALESCE(employee_id, ''), name, phone, email, password_hash, role, is_active, created_at, updated_at
+			FROM staff_users
+			WHERE restaurant_id = $1 AND employee_id = $2;
+		`, restaurantID, employeeID).Scan(&s.ID, &s.RestaurantID, &s.EmployeeID, &s.Name, &s.Phone, &s.Email, &s.PasswordHash, &roleStr, &s.IsActive, &s.CreatedAt, &s.UpdatedAt)
+		if err == nil {
+			s.Role = restaurant.Role(roleStr)
+			return &s, nil
+		}
+	}
+	return r.mem.GetStaffByEmployeeID(ctx, restaurantID, employeeID)
+}
+
 func (r *PostgresRepository) ListStaff(ctx context.Context, restaurantID uuid.UUID) ([]restaurant.StaffUser, error) {
+	if r.pool != nil {
+		rows, err := r.pool.Query(ctx, `
+			SELECT id, restaurant_id, COALESCE(employee_id, ''), name, phone, email, password_hash, role, is_active, created_at, updated_at
+			FROM staff_users
+			WHERE restaurant_id = $1
+			ORDER BY created_at ASC;
+		`, restaurantID)
+		if err == nil {
+			defer rows.Close()
+			var staffList []restaurant.StaffUser
+			for rows.Next() {
+				var s restaurant.StaffUser
+				var roleStr string
+				if err := rows.Scan(&s.ID, &s.RestaurantID, &s.EmployeeID, &s.Name, &s.Phone, &s.Email, &s.PasswordHash, &roleStr, &s.IsActive, &s.CreatedAt, &s.UpdatedAt); err == nil {
+					s.Role = restaurant.Role(roleStr)
+					staffList = append(staffList, s)
+				}
+			}
+			return staffList, nil
+		}
+	}
 	return r.mem.ListStaff(ctx, restaurantID)
 }
 

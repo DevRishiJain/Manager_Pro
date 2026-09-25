@@ -29,6 +29,7 @@ type APIHandler struct {
 	analyticsService  *service.AnalyticsService
 	onboardingService *service.OnboardingService
 	aiCatalogService  *service.AICatalogService
+	staffService      *service.StaffService
 	objectStore       objstore.ObjectStore
 	repo              storage.Repository
 	webhookSecret     string
@@ -36,6 +37,17 @@ type APIHandler struct {
 
 func (h *APIHandler) SetAICatalogService(aiSvc *service.AICatalogService) {
 	h.aiCatalogService = aiSvc
+}
+
+func (h *APIHandler) SetStaffService(staffSvc *service.StaffService) {
+	h.staffService = staffSvc
+}
+
+func (h *APIHandler) getStaffService() *service.StaffService {
+	if h.staffService == nil {
+		h.staffService = service.NewStaffService(h.repo, []byte("table-manager-staff-secret-key-32b"))
+	}
+	return h.staffService
 }
 
 func NewAPIHandler(
@@ -860,6 +872,98 @@ func (h *APIHandler) ListStaff(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	jsonResponse(w, http.StatusOK, staffList)
+}
+
+type CreateStaffRequest struct {
+	Name     string          `json:"name"`
+	Phone    string          `json:"phone"`
+	Email    string          `json:"email"`
+	Password string          `json:"password"`
+	Role     restaurant.Role `json:"role"`
+}
+
+func (h *APIHandler) CreateStaff(w http.ResponseWriter, r *http.Request) {
+	claims, ok := middleware.GetStaffClaimsFromContext(r.Context())
+	if !ok {
+		errorResponse(w, http.StatusUnauthorized, "unauthorized staff")
+		return
+	}
+
+	var req CreateStaffRequest
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		errorResponse(w, http.StatusBadRequest, "invalid request body")
+		return
+	}
+
+	staff, err := h.getStaffService().CreateStaff(r.Context(), service.CreateStaffInput{
+		RestaurantID: claims.RestaurantID,
+		Name:         req.Name,
+		Phone:        req.Phone,
+		Email:        req.Email,
+		Password:     req.Password,
+		Role:         req.Role,
+	}, claims.StaffID)
+	if err != nil {
+		errorResponse(w, http.StatusBadRequest, err.Error())
+		return
+	}
+
+	jsonResponse(w, http.StatusCreated, staff)
+}
+
+type StaffLoginRequest struct {
+	Identifier   string     `json:"identifier"`
+	Password     string     `json:"password"`
+	RestaurantID *uuid.UUID `json:"restaurant_id,omitempty"`
+}
+
+func (h *APIHandler) StaffLogin(w http.ResponseWriter, r *http.Request) {
+	var req StaffLoginRequest
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		errorResponse(w, http.StatusBadRequest, "invalid request payload")
+		return
+	}
+
+	result, err := h.getStaffService().Authenticate(r.Context(), req.Identifier, req.Password, req.RestaurantID)
+	if err != nil {
+		errorResponse(w, http.StatusUnauthorized, err.Error())
+		return
+	}
+
+	jsonResponse(w, http.StatusOK, result)
+}
+
+type PendingOrderResponse struct {
+	Order       order.Order `json:"order"`
+	TableNumber string      `json:"table_number"`
+}
+
+func (h *APIHandler) GetPendingOrders(w http.ResponseWriter, r *http.Request) {
+	claims, ok := middleware.GetStaffClaimsFromContext(r.Context())
+	if !ok {
+		errorResponse(w, http.StatusUnauthorized, "unauthorized staff")
+		return
+	}
+
+	orders, err := h.orderService.ListPendingOrders(r.Context(), claims.RestaurantID)
+	if err != nil {
+		errorResponse(w, http.StatusInternalServerError, err.Error())
+		return
+	}
+
+	res := make([]PendingOrderResponse, len(orders))
+	for i, ord := range orders {
+		tableNum := ord.TableNumber
+		if tableNum == "" {
+			tableNum = "Table"
+		}
+		res[i] = PendingOrderResponse{
+			Order:       ord,
+			TableNumber: tableNum,
+		}
+	}
+
+	jsonResponse(w, http.StatusOK, res)
 }
 
 func (h *APIHandler) GetSettings(w http.ResponseWriter, r *http.Request) {

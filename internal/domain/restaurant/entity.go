@@ -83,6 +83,7 @@ type Table struct {
 type StaffUser struct {
 	ID           uuid.UUID `json:"id"`
 	RestaurantID uuid.UUID `json:"restaurant_id"`
+	EmployeeID   string    `json:"employee_id"`
 	Name         string    `json:"name"`
 	Phone        string    `json:"phone"`
 	Email        string    `json:"email"`

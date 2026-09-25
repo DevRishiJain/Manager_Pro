@@ -103,6 +103,8 @@ func main() {
 	defer cancel()
 	go bgWorker.Start(ctx)
 
+	staffSvc := service.NewStaffService(repo, []byte(cfg.Auth.JWTSecret))
+
 	// Handlers & Router
 	apiHandler := handlers.NewAPIHandler(
 		sessionSvc,
@@ -116,6 +118,7 @@ func main() {
 		repo,
 		cfg.Razorpay.WebhookSecret,
 	)
+	apiHandler.SetStaffService(staffSvc)
 	if aiCatalogSvc != nil {
 		apiHandler.SetAICatalogService(aiCatalogSvc)
 	}
