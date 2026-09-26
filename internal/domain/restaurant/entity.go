@@ -29,6 +29,15 @@ const (
 	SharedSessionPolicySingleDevice SharedSessionPolicy = "SINGLE_DEVICE_SESSION"
 )
 
+type VenueType string
+
+const (
+	VenueTypeFineDine VenueType = "FINE_DINE"
+	VenueTypeCafe     VenueType = "CAFE"
+	VenueTypeHotel    VenueType = "HOTEL"
+	VenueTypeDriveIn  VenueType = "DRIVE_IN"
+)
+
 type Role string
 
 const (
@@ -61,6 +70,7 @@ func (r Role) CanEditMenu() bool {
 type Restaurant struct {
 	ID                    uuid.UUID   `json:"id"`
 	Name                  string      `json:"name"`
+	VenueType             VenueType   `json:"venue_type,omitempty"`
 	GSTIN                 string      `json:"gstin"`
 	CommissionRateBps     int64       `json:"commission_rate_bps"` // Default 100 = 1.00%
 	SettlementBankDetails string      `json:"settlement_bank_details"`

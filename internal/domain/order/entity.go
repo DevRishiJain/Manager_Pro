@@ -90,6 +90,7 @@ type Order struct {
 	CustomerName             string             `json:"customer_name,omitempty"`
 	CustomerPhone            string             `json:"customer_phone,omitempty"`
 	GuestCount               int                `json:"guest_count,omitempty"`
+	VehicleNumber            string             `json:"vehicle_number,omitempty"`
 	Status                   State              `json:"status"`
 	PlacedAt                 time.Time          `json:"placed_at"`
 	AcceptedAt               *time.Time         `json:"accepted_at,omitempty"`

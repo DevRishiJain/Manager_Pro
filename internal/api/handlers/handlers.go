@@ -116,6 +116,8 @@ type StartSessionRequest struct {
 	PhoneNumber       string `json:"phone_number"`
 	GuestCount        int    `json:"guest_count"`
 	NumberOfGuests    int    `json:"no_of_guests"`
+	VehicleNumber     string `json:"vehicle_number"`
+	CarNumber         string `json:"car_number"`
 	DeviceFingerprint string `json:"device_fingerprint"`
 }
 
@@ -147,7 +149,12 @@ func (h *APIHandler) StartSession(w http.ResponseWriter, r *http.Request) {
 		guestCount = 2
 	}
 
-	sess, isNew, err := h.sessionService.StartSession(r.Context(), req.TableToken, req.DeviceToken, displayName, customerPhone, guestCount, req.DeviceFingerprint)
+	vehicleNumber := strings.TrimSpace(req.VehicleNumber)
+	if vehicleNumber == "" {
+		vehicleNumber = strings.TrimSpace(req.CarNumber)
+	}
+
+	sess, isNew, err := h.sessionService.StartSession(r.Context(), req.TableToken, req.DeviceToken, displayName, customerPhone, vehicleNumber, guestCount, req.DeviceFingerprint)
 	if err != nil {
 		errorResponse(w, http.StatusBadRequest, err.Error())
 		return
@@ -1049,6 +1056,7 @@ type PendingOrderResponse struct {
 	CustomerName  string      `json:"customer_name,omitempty"`
 	CustomerPhone string      `json:"customer_phone,omitempty"`
 	GuestCount    int         `json:"guest_count,omitempty"`
+	VehicleNumber string      `json:"vehicle_number,omitempty"`
 }
 
 func (h *APIHandler) GetPendingOrders(w http.ResponseWriter, r *http.Request) {
@@ -1084,6 +1092,7 @@ func (h *APIHandler) GetPendingOrders(w http.ResponseWriter, r *http.Request) {
 			CustomerName:  custName,
 			CustomerPhone: ord.CustomerPhone,
 			GuestCount:    guestCount,
+			VehicleNumber: ord.VehicleNumber,
 		}
 	}
 
@@ -1630,6 +1639,7 @@ func (h *APIHandler) AIQueryMenu(w http.ResponseWriter, r *http.Request) {
 
 type OnboardRestaurantRequest struct {
 	RestaurantName string `json:"restaurant_name"`
+	VenueType      string `json:"venue_type"`
 	Slug           string `json:"slug"`
 	LegalName      string `json:"legal_name"`
 	GSTIN          string `json:"gstin"`
@@ -1703,9 +1713,22 @@ func (h *APIHandler) OnboardRestaurant(w http.ResponseWriter, r *http.Request) {
 	}
 
 	now := time.Now()
+	venueType := restaurant.VenueTypeFineDine
+	switch strings.ToUpper(strings.TrimSpace(req.VenueType)) {
+	case "HOTEL", "ROOM_SERVICE":
+		venueType = restaurant.VenueTypeHotel
+	case "DRIVE_IN", "CAR_O_BAR", "CAR_BAR", "DRIVE_THRU":
+		venueType = restaurant.VenueTypeDriveIn
+	case "CAFE", "QSR":
+		venueType = restaurant.VenueTypeCafe
+	default:
+		venueType = restaurant.VenueTypeFineDine
+	}
+
 	rest := &restaurant.Restaurant{
 		ID:                    restID,
 		Name:                  name,
+		VenueType:             venueType,
 		GSTIN:                 gstin,
 		CommissionRateBps:     100,
 		SettlementBankDetails: strings.TrimSpace(req.LegalName),
@@ -1755,17 +1778,29 @@ func (h *APIHandler) OnboardRestaurant(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	// 3. Tables
+	// 3. Tables / Rooms / Universal Drive-In Station
 	createdTables := make([]restaurant.Table, 0)
 	if len(req.Tables) > 0 {
 		for _, t := range req.Tables {
 			tblToken := strings.TrimSpace(t.TableToken)
 			if tblToken == "" {
-				tblToken = fmt.Sprintf("TBL-%s-%03d", restID.String()[:4], len(createdTables)+1)
+				prefix := "TBL"
+				if venueType == restaurant.VenueTypeHotel {
+					prefix = "ROOM"
+				} else if venueType == restaurant.VenueTypeDriveIn {
+					prefix = "DRIVE"
+				}
+				tblToken = fmt.Sprintf("%s-%s-%03d", prefix, restID.String()[:4], len(createdTables)+1)
 			}
 			tblNum := strings.TrimSpace(t.TableNumber)
 			if tblNum == "" {
-				tblNum = fmt.Sprintf("Table %d", len(createdTables)+1)
+				if venueType == restaurant.VenueTypeHotel {
+					tblNum = fmt.Sprintf("Room %d", 100+len(createdTables)+1)
+				} else if venueType == restaurant.VenueTypeDriveIn {
+					tblNum = fmt.Sprintf("Drive-In Bay %d", len(createdTables)+1)
+				} else {
+					tblNum = fmt.Sprintf("Table %d", len(createdTables)+1)
+				}
 			}
 			tbl := &restaurant.Table{
 				ID:           uuid.New(),
@@ -1779,7 +1814,42 @@ func (h *APIHandler) OnboardRestaurant(w http.ResponseWriter, r *http.Request) {
 			_ = h.repo.CreateTable(r.Context(), tbl)
 			createdTables = append(createdTables, *tbl)
 		}
+	} else if venueType == restaurant.VenueTypeDriveIn {
+		// Drive-In / Car-O-Bar: Single common static QR standee for vehicle ordering
+		tblToken := fmt.Sprintf("DRIVE-%s", restID.String()[:4])
+		tbl := &restaurant.Table{
+			ID:           uuid.New(),
+			RestaurantID: restID,
+			TableNumber:  "Drive-In Universal",
+			TableToken:   tblToken,
+			IsActive:     true,
+			CreatedAt:    now,
+			UpdatedAt:    now,
+		}
+		_ = h.repo.CreateTable(r.Context(), tbl)
+		createdTables = append(createdTables, *tbl)
+	} else if venueType == restaurant.VenueTypeHotel {
+		// Hotel: Rooms 101 to 100+count
+		count := req.TableCount
+		if count <= 0 {
+			count = 10
+		}
+		for i := 1; i <= count; i++ {
+			tblToken := fmt.Sprintf("ROOM-%s-%03d", restID.String()[:4], i)
+			tbl := &restaurant.Table{
+				ID:           uuid.New(),
+				RestaurantID: restID,
+				TableNumber:  fmt.Sprintf("Room %d", 100+i),
+				TableToken:   tblToken,
+				IsActive:     true,
+				CreatedAt:    now,
+				UpdatedAt:    now,
+			}
+			_ = h.repo.CreateTable(r.Context(), tbl)
+			createdTables = append(createdTables, *tbl)
+		}
 	} else {
+		// Fine Dine / Cafe: Tables 1 to count
 		count := req.TableCount
 		if count <= 0 {
 			count = 8
@@ -1938,6 +2008,8 @@ func (h *APIHandler) OnboardRestaurant(w http.ResponseWriter, r *http.Request) {
 		"token":           token,
 		"restaurant_id":   restID,
 		"restaurant_name": rest.Name,
+		"venue_type":      rest.VenueType,
+		"restaurant":      rest,
 		"admin": map[string]interface{}{
 			"id":          adminUser.ID,
 			"name":        adminUser.Name,

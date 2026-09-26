@@ -150,7 +150,7 @@ func TestWaiterScreenAndStaffAPIs(t *testing.T) {
 	waiterToken := loginResp.Token
 
 	// 3. Customer Session & Order Creation
-	sess, _, err := sessionSvc.StartSession(ctx, tbl.TableToken, "device-1", "Customer", "+919876543210", 2, "fp-1")
+	sess, _, err := sessionSvc.StartSession(ctx, tbl.TableToken, "device-1", "Customer", "+919876543210", "", 2, "fp-1")
 	if err != nil {
 		t.Fatalf("failed to start session: %v", err)
 	}

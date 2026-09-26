@@ -239,7 +239,10 @@ func (m *MemoryRepository) CreateOrder(ctx context.Context, o *order.Order, item
 
 func (m *MemoryRepository) enrichOrderDetails(o *order.Order) {
 	if sess, exists := m.sessions[o.SessionID]; exists {
-		if tbl, tblExists := m.tables[sess.TableID]; tblExists && tbl.TableNumber != "" {
+		if sess.VehicleNumber != "" {
+			o.VehicleNumber = sess.VehicleNumber
+			o.TableNumber = "Car " + strings.ToUpper(sess.VehicleNumber)
+		} else if tbl, tblExists := m.tables[sess.TableID]; tblExists && tbl.TableNumber != "" {
 			o.TableNumber = tbl.TableNumber
 		}
 		if o.CustomerName == "" && sess.CustomerName != "" {
@@ -796,6 +799,35 @@ func (m *MemoryRepository) seedDefaultData() {
 			m.tablesByToken["table-qr-token-spice-route-02"] = t
 		}
 	}
+
+	// 3b. Seeded Drive-In Universal QR Standee & Hotel Room 101 Tent Card
+	driveTblID := uuid.New()
+	driveTbl := &restaurant.Table{
+		ID:           driveTblID,
+		RestaurantID: restID,
+		TableNumber:  "Drive-In Universal",
+		TableToken:   "DRIVE-CAR-01",
+		IsActive:     true,
+		CreatedAt:    now,
+		UpdatedAt:    now,
+	}
+	m.tables[driveTblID] = driveTbl
+	m.tablesByToken["DRIVE-CAR-01"] = driveTbl
+	m.tablesByToken["table-qr-token-drivein-01"] = driveTbl
+
+	roomTblID := uuid.New()
+	roomTbl := &restaurant.Table{
+		ID:           roomTblID,
+		RestaurantID: restID,
+		TableNumber:  "Room 101",
+		TableToken:   "ROOM-101",
+		IsActive:     true,
+		CreatedAt:    now,
+		UpdatedAt:    now,
+	}
+	m.tables[roomTblID] = roomTbl
+	m.tablesByToken["ROOM-101"] = roomTbl
+	m.tablesByToken["table-qr-token-hotel-101"] = roomTbl
 
 	// 4. Menu Categories
 	catStartersID := uuid.New()

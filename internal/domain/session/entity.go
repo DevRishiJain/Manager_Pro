@@ -104,6 +104,7 @@ type DiningSession struct {
 	CustomerName       string       `json:"customer_name,omitempty"`
 	CustomerPhone      string       `json:"customer_phone,omitempty"`
 	GuestCount         int          `json:"guest_count,omitempty"`
+	VehicleNumber      string       `json:"vehicle_number,omitempty"`
 	ID                 uuid.UUID    `json:"id"`
 	RestaurantID       uuid.UUID    `json:"restaurant_id"`
 	TableID            uuid.UUID    `json:"table_id"`
@@ -130,6 +131,7 @@ type DiningSession struct {
 type SessionParticipant struct {
 	CustomerPhone string    `json:"customer_phone,omitempty"`
 	GuestCount    int       `json:"guest_count,omitempty"`
+	VehicleNumber string    `json:"vehicle_number,omitempty"`
 	ID          uuid.UUID `json:"id"`
 	SessionID   uuid.UUID `json:"session_id"`
 	DeviceToken string    `json:"device_token"`

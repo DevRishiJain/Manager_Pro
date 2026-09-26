@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"strings"
 	"time"
 
 	"github.com/devrishijain/table-manager/internal/domain/audit"
@@ -182,6 +183,10 @@ func (s *OrderService) PlaceOrder(ctx context.Context, sessionID uuid.UUID, cart
 	if guestCount <= 0 {
 		guestCount = 1
 	}
+	vehicleNumber := strings.TrimSpace(sess.VehicleNumber)
+	if vehicleNumber != "" {
+		tableNumber = "Car " + strings.ToUpper(vehicleNumber)
+	}
 
 	newOrder := &order.Order{
 		ID:                       orderID,
@@ -192,6 +197,7 @@ func (s *OrderService) PlaceOrder(ctx context.Context, sessionID uuid.UUID, cart
 		CustomerName:             customerName,
 		CustomerPhone:            customerPhone,
 		GuestCount:               guestCount,
+		VehicleNumber:            vehicleNumber,
 		Status:                   initialOrderStatus,
 		PlacedAt:                 now,
 		Subtotal:                 money.New(subtotalMinor),

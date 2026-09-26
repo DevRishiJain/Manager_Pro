@@ -3,6 +3,7 @@ package postgres
 import (
 	"context"
 	"encoding/json"
+	"strings"
 	"time"
 
 	"github.com/devrishijain/table-manager/internal/domain/audit"
@@ -433,6 +434,7 @@ func (r *PostgresRepository) ListKitchenQueue(ctx context.Context, restaurantID 
 				COALESCE(NULLIF(ds.customer_name, ''), 'Guest Diner') AS customer_name,
 				COALESCE(ds.customer_phone, '') AS customer_phone,
 				COALESCE(NULLIF(ds.guest_count, 0), 1) AS guest_count,
+				COALESCE(ds.vehicle_number, '') AS vehicle_number,
 				COALESCE(o.items_summary, '[]'::jsonb) AS items_json
 			FROM orders o
 			LEFT JOIN dining_sessions ds ON ds.id = o.session_id
@@ -469,8 +471,12 @@ func (r *PostgresRepository) ListKitchenQueue(ctx context.Context, restaurantID 
 					&o.CustomerName,
 					&o.CustomerPhone,
 					&o.GuestCount,
+					&o.VehicleNumber,
 					&itemsJSON,
 				); err == nil {
+					if o.VehicleNumber != "" {
+						o.TableNumber = "Car " + strings.ToUpper(o.VehicleNumber)
+					}
 					o.Status = order.State(statusStr)
 					o.Subtotal = money.New(subMinor)
 					o.TaxTotal = money.New(taxMinor)
@@ -528,6 +534,7 @@ func (r *PostgresRepository) ListPendingOrders(ctx context.Context, restaurantID
 				COALESCE(NULLIF(ds.customer_name, ''), 'Guest Diner') AS customer_name,
 				COALESCE(ds.customer_phone, '') AS customer_phone,
 				COALESCE(NULLIF(ds.guest_count, 0), 1) AS guest_count,
+				COALESCE(ds.vehicle_number, '') AS vehicle_number,
 				COALESCE(o.items_summary, '[]'::jsonb) AS items_json
 			FROM orders o
 			LEFT JOIN dining_sessions ds ON ds.id = o.session_id
@@ -562,8 +569,12 @@ func (r *PostgresRepository) ListPendingOrders(ctx context.Context, restaurantID
 					&o.CustomerName,
 					&o.CustomerPhone,
 					&o.GuestCount,
+					&o.VehicleNumber,
 					&itemsJSON,
 				); err == nil {
+					if o.VehicleNumber != "" {
+						o.TableNumber = "Car " + strings.ToUpper(o.VehicleNumber)
+					}
 					o.Status = order.State(statusStr)
 					o.Subtotal = money.New(subMinor)
 					o.TaxTotal = money.New(taxMinor)

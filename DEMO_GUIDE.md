@@ -11,7 +11,9 @@ All default staff accounts are pre-seeded in the database with the master passwo
 
 | Persona / Role | Route | User / Employee ID | Password | Access Capabilities |
 | :--- | :--- | :--- | :--- | :--- |
-| **Diner / Customer** | `/t/TBL-001` or `/t/table-qr-token-spice-route-01` | *Self-entry: Name, Phone, Guest Count* | *None (No OTP)* | QR onboarding, menu browsing, Ask AI concierge, cart checkout, order tracking, bill payment, exit pass. |
+| **Diner (Fine-Dine/Cafe)** | `/t/TBL-001` or `/t/table-qr-token-spice-route-01` | *Self-entry: Name, Phone, Guest Count* | *None (No OTP)* | Table QR dining, menu browsing, Ask AI concierge, cart checkout, order tracking, bill payment, exit pass. |
+| **Diner (Drive-In / Car-O-Bar)** | `/t/table-qr-token-drivein-01` | *Self-entry: Car Plate (e.g. DL 01 AB 1234), Name, Phone, Guests* | *None (No OTP)* | Universal static QR, car plate binding, waiter car-hop delivery to vehicle window. |
+| **Guest (Hotel Room Service)** | `/t/table-qr-token-hotel-101` | *Self-entry: Name, Phone, Guests (Room 101)* | *None (No OTP)* | In-room dining QR tent card, food delivered directly to hotel room door. |
 | **Floor Waiter** | `/staff/login` &rarr; `/staff/orders` | `EMP-WTR-001` | `password123` | Accept placed orders, verify first-order table OTP, pickup ready orders at kitchen pass, mark served. |
 | **Kitchen Chef (KDS)** | `/staff/login` &rarr; `/kitchen/queue` | `EMP-CHF-001` | `password123` | 4-Stage Kanban touch display: `ACCEPTED` &rarr; `PREPARING` &rarr; `READY` &rarr; `SERVED`. |
 | **Cashier / POS** | `/staff/login` &rarr; `/staff/payments` | `EMP-CSH-001` | `password123` | Confirm pending cash payments and credit card POS swipe settlements. |
@@ -95,6 +97,26 @@ Follow this sequence for a flawless demo showcasing the entire platform lifecycl
    - The screen moves to the order tracker (`/dine/[sessionId]/orders`).
    - Point out the **bold 4-digit Table Verification Code** (e.g., `4819`).
    - Explain: *"This prevents fraudulent orders from outside the restaurant. The order is placed but on hold until floor staff verifies table occupancy."*
+
+
+### Phase 1B: Drive-In & Car-O-Bar Experience (Vehicle Ordering)
+1. **Universal Static QR Scan**:
+   - Open `/t/table-qr-token-drivein-01` (or scan the universal Drive-In QR code from any parking bay).
+   - Point out the car icon 🚗 and banner: **"Drive-In • Car-O-Bar"**.
+   - Enter Car Number Plate: `DL 01 AB 1234` (mandatory for vehicle delivery).
+   - Enter Name: `Dev Rishi Jain`, Phone: `9876543210`, and Party Size: `3 Guests`.
+   - Tap **"Place Car Order & View Menu"**.
+2. **Order Placement & Routing**:
+   - Add dishes to cart and place the order.
+   - On Kitchen KDS (`/kitchen/queue`): The ticket immediately appears with a bold amber badge **🚗 Car DL 01 AB 1234** and party count.
+   - On Waiter Station (`/staff/orders`): Waiters see: **"Deliver to Dev Rishi Jain at Car DL 01 AB 1234 (3 Guests)"**.
+   - When food is ready at pass, the waiter button states: **"Mark Delivered to Car ✅"**.
+
+### Phase 1C: Hotel In-Room Dining Experience
+1. **In-Room QR Scan**:
+   - Open `/t/table-qr-token-hotel-101` (representing Room 101 tent card).
+   - Notice the purple hotel badge **🏨 Room 101 • In-Room Dining**.
+   - Place order; KDS and Waiter station route the ticket directly to **Room 101** with **"Deliver to Room 101 ✅"**.
 
 ### Phase 2: Floor Waiter Flow
 1. Open `/staff/login` in another browser window or tab.

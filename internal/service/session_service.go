@@ -39,7 +39,7 @@ func NewSessionService(repo storage.Repository) *SessionService {
 // - If policy is SHARED_TABLE_SESSION: joins participant and returns current session.
 // - If policy is SINGLE_DEVICE_SESSION: rejects secondary joins.
 // If no active session exists: creates a fresh DiningSession in StateOpen.
-func (s *SessionService) StartSession(ctx context.Context, tableToken, deviceToken, displayName, customerPhone string, guestCount int, deviceFingerprint string) (*session.DiningSession, bool, error) {
+func (s *SessionService) StartSession(ctx context.Context, tableToken, deviceToken, displayName, customerPhone, vehicleNumber string, guestCount int, deviceFingerprint string) (*session.DiningSession, bool, error) {
 	table, err := s.repo.GetTableByToken(ctx, tableToken)
 	if err != nil || !table.IsActive {
 		return nil, false, ErrInvalidTableQR
@@ -77,6 +77,9 @@ func (s *SessionService) StartSession(ctx context.Context, tableToken, deviceTok
 		if activeSession.CustomerPhone == "" && customerPhone != "" {
 			activeSession.CustomerPhone = customerPhone
 		}
+		if activeSession.VehicleNumber == "" && vehicleNumber != "" {
+			activeSession.VehicleNumber = vehicleNumber
+		}
 		if activeSession.GuestCount <= 0 && guestCount > 0 {
 			activeSession.GuestCount = guestCount
 		}
@@ -90,6 +93,7 @@ func (s *SessionService) StartSession(ctx context.Context, tableToken, deviceTok
 			DisplayName:   displayName,
 			CustomerPhone: customerPhone,
 			GuestCount:    guestCount,
+			VehicleNumber: vehicleNumber,
 			JoinedAt:      time.Now(),
 		}
 		_ = s.repo.AddParticipant(ctx, participant)
@@ -114,6 +118,7 @@ func (s *SessionService) StartSession(ctx context.Context, tableToken, deviceTok
 		CustomerName:      displayName,
 		CustomerPhone:     customerPhone,
 		GuestCount:        guestCount,
+		VehicleNumber:     vehicleNumber,
 		Status:            session.StateOpen,
 		OpenedAt:          now,
 		RunningTotal:      money.Zero(),
@@ -147,6 +152,7 @@ func (s *SessionService) StartSession(ctx context.Context, tableToken, deviceTok
 		DisplayName:   displayName,
 		CustomerPhone: customerPhone,
 		GuestCount:    guestCount,
+		VehicleNumber: vehicleNumber,
 		JoinedAt:      now,
 	})
 

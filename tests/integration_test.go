@@ -84,7 +84,7 @@ func TestFullDiningSessionLifecycleEndToEnd(t *testing.T) {
 	})
 
 	// 3. Customer scans Table QR -> Session opens
-	sess, isNew, err := sessionSvc.StartSession(ctx, tableToken, "customer-device-1", "Aman", "+919876543210", 2, "fp-cookie-1")
+	sess, isNew, err := sessionSvc.StartSession(ctx, tableToken, "customer-device-1", "Aman", "+919876543210", "", 2, "fp-cookie-1")
 	if err != nil || !isNew {
 		t.Fatalf("failed to start session: %v", err)
 	}
