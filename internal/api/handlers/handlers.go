@@ -446,13 +446,21 @@ func (h *APIHandler) GuardVerifyExit(w http.ResponseWriter, r *http.Request) {
 // ---------------- Kitchen KDS Handlers ----------------
 
 func (h *APIHandler) GetKitchenQueue(w http.ResponseWriter, r *http.Request) {
-	claims, ok := middleware.GetStaffClaimsFromContext(r.Context())
-	if !ok {
-		errorResponse(w, http.StatusUnauthorized, "unauthorized staff")
+	var restaurantID uuid.UUID
+	if claims, ok := middleware.GetStaffClaimsFromContext(r.Context()); ok && claims.RestaurantID != uuid.Nil {
+		restaurantID = claims.RestaurantID
+	} else if restParam := r.URL.Query().Get("restaurant_id"); restParam != "" {
+		if parsed, err := uuid.Parse(restParam); err == nil {
+			restaurantID = parsed
+		}
+	}
+
+	if restaurantID == uuid.Nil {
+		errorResponse(w, http.StatusBadRequest, "restaurant_id is required either from staff authentication or query parameter")
 		return
 	}
 
-	queue, err := h.orderService.ListKitchenQueue(r.Context(), claims.RestaurantID)
+	queue, err := h.orderService.ListKitchenQueue(r.Context(), restaurantID)
 	if err != nil {
 		errorResponse(w, http.StatusInternalServerError, err.Error())
 		return
@@ -766,12 +774,21 @@ func (h *APIHandler) GetSettlements(w http.ResponseWriter, r *http.Request) {
 // ---------------- Menu & Staff Management Handlers ----------------
 
 func (h *APIHandler) ListCategories(w http.ResponseWriter, r *http.Request) {
-	claims, ok := middleware.GetStaffClaimsFromContext(r.Context())
-	if !ok {
-		errorResponse(w, http.StatusUnauthorized, "unauthorized staff")
+	var restaurantID uuid.UUID
+	if claims, ok := middleware.GetStaffClaimsFromContext(r.Context()); ok && claims.RestaurantID != uuid.Nil {
+		restaurantID = claims.RestaurantID
+	} else if restParam := r.URL.Query().Get("restaurant_id"); restParam != "" {
+		if parsed, err := uuid.Parse(restParam); err == nil {
+			restaurantID = parsed
+		}
+	}
+
+	if restaurantID == uuid.Nil {
+		errorResponse(w, http.StatusBadRequest, "restaurant_id is required either from staff authentication or query parameter")
 		return
 	}
-	cats, err := h.repo.ListCategories(r.Context(), claims.RestaurantID)
+
+	cats, err := h.repo.ListCategories(r.Context(), restaurantID)
 	if err != nil {
 		errorResponse(w, http.StatusInternalServerError, err.Error())
 		return
@@ -809,12 +826,21 @@ func (h *APIHandler) CreateCategory(w http.ResponseWriter, r *http.Request) {
 }
 
 func (h *APIHandler) ListMenuItems(w http.ResponseWriter, r *http.Request) {
-	claims, ok := middleware.GetStaffClaimsFromContext(r.Context())
-	if !ok {
-		errorResponse(w, http.StatusUnauthorized, "unauthorized staff")
+	var restaurantID uuid.UUID
+	if claims, ok := middleware.GetStaffClaimsFromContext(r.Context()); ok && claims.RestaurantID != uuid.Nil {
+		restaurantID = claims.RestaurantID
+	} else if restParam := r.URL.Query().Get("restaurant_id"); restParam != "" {
+		if parsed, err := uuid.Parse(restParam); err == nil {
+			restaurantID = parsed
+		}
+	}
+
+	if restaurantID == uuid.Nil {
+		errorResponse(w, http.StatusBadRequest, "restaurant_id is required either from staff authentication or query parameter")
 		return
 	}
-	items, err := h.repo.ListMenuItems(r.Context(), claims.RestaurantID)
+
+	items, err := h.repo.ListMenuItems(r.Context(), restaurantID)
 	if err != nil {
 		errorResponse(w, http.StatusInternalServerError, err.Error())
 		return

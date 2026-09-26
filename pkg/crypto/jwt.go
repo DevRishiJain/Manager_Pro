@@ -1,6 +1,7 @@
 package crypto
 
 import (
+	"encoding/json"
 	"errors"
 	"time"
 
@@ -22,10 +23,90 @@ type StaffClaims struct {
 	jwt.RegisteredClaims
 }
 
+// UnmarshalJSON provides backward compatibility for string IDs (e.g. "s-admin-001") by deriving a deterministic UUID.
+func (c *StaffClaims) UnmarshalJSON(data []byte) error {
+	type Alias StaffClaims
+	aux := struct {
+		RawStaffID      json.RawMessage `json:"staff_id"`
+		RawRestaurantID json.RawMessage `json:"restaurant_id"`
+		*Alias
+	}{
+		Alias: (*Alias)(c),
+	}
+
+	if err := json.Unmarshal(data, &aux); err != nil {
+		return err
+	}
+
+	if len(aux.RawStaffID) > 0 {
+		var str string
+		if err := json.Unmarshal(aux.RawStaffID, &str); err == nil && str != "" {
+			if parsed, err := uuid.Parse(str); err == nil {
+				c.StaffID = parsed
+			} else {
+				c.StaffID = uuid.NewSHA1(uuid.NameSpaceOID, []byte(str))
+			}
+		}
+	}
+
+	if len(aux.RawRestaurantID) > 0 {
+		var str string
+		if err := json.Unmarshal(aux.RawRestaurantID, &str); err == nil && str != "" {
+			if parsed, err := uuid.Parse(str); err == nil {
+				c.RestaurantID = parsed
+			} else {
+				c.RestaurantID = uuid.NewSHA1(uuid.NameSpaceOID, []byte(str))
+			}
+		}
+	}
+
+	return nil
+}
+
 type GuardClaims struct {
 	GuardID      uuid.UUID `json:"guard_id"`
 	RestaurantID uuid.UUID `json:"restaurant_id"`
 	jwt.RegisteredClaims
+}
+
+// UnmarshalJSON provides backward compatibility for guard string IDs by deriving a deterministic UUID.
+func (c *GuardClaims) UnmarshalJSON(data []byte) error {
+	type Alias GuardClaims
+	aux := struct {
+		RawGuardID      json.RawMessage `json:"guard_id"`
+		RawRestaurantID json.RawMessage `json:"restaurant_id"`
+		*Alias
+	}{
+		Alias: (*Alias)(c),
+	}
+
+	if err := json.Unmarshal(data, &aux); err != nil {
+		return err
+	}
+
+	if len(aux.RawGuardID) > 0 {
+		var str string
+		if err := json.Unmarshal(aux.RawGuardID, &str); err == nil && str != "" {
+			if parsed, err := uuid.Parse(str); err == nil {
+				c.GuardID = parsed
+			} else {
+				c.GuardID = uuid.NewSHA1(uuid.NameSpaceOID, []byte(str))
+			}
+		}
+	}
+
+	if len(aux.RawRestaurantID) > 0 {
+		var str string
+		if err := json.Unmarshal(aux.RawRestaurantID, &str); err == nil && str != "" {
+			if parsed, err := uuid.Parse(str); err == nil {
+				c.RestaurantID = parsed
+			} else {
+				c.RestaurantID = uuid.NewSHA1(uuid.NameSpaceOID, []byte(str))
+			}
+		}
+	}
+
+	return nil
 }
 
 // GenerateStaffJWT creates a signed JWT for staff or platform admin users.

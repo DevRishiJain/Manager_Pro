@@ -241,7 +241,11 @@ func (s *OrderService) AcceptOrder(ctx context.Context, orderID, staffID uuid.UU
 	now := time.Now()
 	ord.Status = order.StateAccepted
 	ord.AcceptedAt = &now
-	ord.AcceptedByStaffID = &staffID
+	if staffID != uuid.Nil {
+		ord.AcceptedByStaffID = &staffID
+	}
+	ord.UpdatedAt = now
+	ord.Version++
 
 	if err := s.repo.UpdateOrder(ctx, ord); err != nil {
 		return nil, err
@@ -252,13 +256,17 @@ func (s *OrderService) AcceptOrder(ctx context.Context, orderID, staffID uuid.UU
 	if err == nil && sess.Status == session.StateOpen {
 		sess.Status = session.StateOpenVerified
 		sess.VerifiedAt = &now
-		sess.VerifiedByStaffID = &staffID
+		if staffID != uuid.Nil {
+			sess.VerifiedByStaffID = &staffID
+		}
+		sess.UpdatedAt = now
 		_ = s.repo.UpdateSession(ctx, sess)
 	}
 
 	orderBytes, _ := json.Marshal(ord)
+	auditID := uuid.New()
 	_ = s.repo.AppendAuditLog(ctx, &audit.AuditLog{
-		ID:           uuid.New(),
+		ID:           auditID,
 		ActorType:    audit.ActorTypeStaff,
 		ActorID:      staffID.String(),
 		RestaurantID: ord.RestaurantID,
@@ -270,6 +278,7 @@ func (s *OrderService) AcceptOrder(ctx context.Context, orderID, staffID uuid.UU
 
 	_ = s.repo.AppendStaffAction(ctx, &audit.StaffAction{
 		ID:           uuid.New(),
+		AuditLogID:   auditID,
 		StaffID:      staffID,
 		RestaurantID: ord.RestaurantID,
 		SessionID:    &ord.SessionID,

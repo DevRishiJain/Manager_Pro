@@ -81,6 +81,24 @@ func StaffAuth(jwtSecret []byte) func(http.Handler) http.Handler {
 	}
 }
 
+// StaffAuthOptional parses Staff JWT if present in Authorization header, without rejecting unauthenticated requests.
+func StaffAuthOptional(jwtSecret []byte) func(http.Handler) http.Handler {
+	return func(next http.Handler) http.Handler {
+		return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			authHeader := r.Header.Get("Authorization")
+			if strings.HasPrefix(authHeader, "Bearer ") {
+				tokenStr := strings.TrimPrefix(authHeader, "Bearer ")
+				claims, err := crypto.ParseStaffJWT(jwtSecret, tokenStr)
+				if err == nil && claims != nil && claims.StaffID != uuid.Nil {
+					ctx := context.WithValue(r.Context(), StaffContextKey, claims)
+					r = r.WithContext(ctx)
+				}
+			}
+			next.ServeHTTP(w, r)
+		})
+	}
+}
+
 // RequireRole checks that staff has one of the required roles.
 func RequireRole(allowedRoles ...string) func(http.Handler) http.Handler {
 	roleMap := make(map[string]bool)

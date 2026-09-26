@@ -381,11 +381,30 @@ func (r *PostgresRepository) GetOrdersBySessionID(ctx context.Context, sessionID
 func (r *PostgresRepository) UpdateOrder(ctx context.Context, o *order.Order) error {
 	_ = r.mem.UpdateOrder(ctx, o)
 	if r.pool != nil {
-		_, _ = r.pool.Exec(ctx, `
+		var validStaffID *uuid.UUID = o.AcceptedByStaffID
+		if validStaffID != nil && *validStaffID != uuid.Nil {
+			var exists bool
+			err := r.pool.QueryRow(ctx, `SELECT EXISTS(SELECT 1 FROM staff_users WHERE id = $1)`, *validStaffID).Scan(&exists)
+			if err != nil || !exists {
+				validStaffID = nil
+			}
+		} else {
+			validStaffID = nil
+		}
+
+		updatedAt := o.UpdatedAt
+		if updatedAt.IsZero() {
+			updatedAt = time.Now().UTC()
+		}
+
+		_, err := r.pool.Exec(ctx, `
 			UPDATE orders 
 			SET status = $1, accepted_at = $2, accepted_by_staff_id = $3, cancelled_at = $4, cancellation_stage = $5, cancellation_fee_applicable = $6, version = $7, updated_at = $8 
 			WHERE id = $9;
-		`, string(o.Status), o.AcceptedAt, o.AcceptedByStaffID, o.CancelledAt, o.CancellationStage, o.CancellationFeeApplicable, o.Version, o.UpdatedAt, o.ID)
+		`, string(o.Status), o.AcceptedAt, validStaffID, o.CancelledAt, o.CancellationStage, o.CancellationFeeApplicable, o.Version, updatedAt, o.ID)
+		if err != nil {
+			return err
+		}
 	}
 	return nil
 }
@@ -1112,11 +1131,17 @@ func (r *PostgresRepository) AppendAuditLog(ctx context.Context, log *audit.Audi
 func (r *PostgresRepository) AppendStaffAction(ctx context.Context, action *audit.StaffAction) error {
 	_ = r.mem.AppendStaffAction(ctx, action)
 	if r.pool != nil {
-		_, _ = r.pool.Exec(ctx, `
-			INSERT INTO staff_actions (id, audit_log_id, staff_id, restaurant_id, session_id, action_type, reason, metadata, created_at)
-			VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9)
-			ON CONFLICT (id) DO NOTHING;
-		`, action.ID, action.AuditLogID, action.StaffID, action.RestaurantID, action.SessionID, action.ActionType, action.Reason, action.Metadata, action.CreatedAt)
+		var staffExists bool
+		if action.StaffID != uuid.Nil {
+			_ = r.pool.QueryRow(ctx, `SELECT EXISTS(SELECT 1 FROM staff_users WHERE id = $1)`, action.StaffID).Scan(&staffExists)
+		}
+		if staffExists && action.AuditLogID != uuid.Nil {
+			_, _ = r.pool.Exec(ctx, `
+				INSERT INTO staff_actions (id, audit_log_id, staff_id, restaurant_id, session_id, action_type, reason, metadata, created_at)
+				VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9)
+				ON CONFLICT (id) DO NOTHING;
+			`, action.ID, action.AuditLogID, action.StaffID, action.RestaurantID, action.SessionID, action.ActionType, action.Reason, action.Metadata, action.CreatedAt)
+		}
 	}
 	return nil
 }

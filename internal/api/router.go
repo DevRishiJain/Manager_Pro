@@ -68,10 +68,16 @@ func NewRouter(handler *handlers.APIHandler, repo storage.Repository, jwtSecret 
 
 		// Kitchen (KDS) routes
 		api.Group(func(kr chi.Router) {
-			kr.Use(middleware.StaffAuth(jwtSecret))
-			kr.Use(middleware.RequireRole("KITCHEN", "MANAGER", "RESTAURANT_ADMIN", "RESTAURANT_OWNER"))
+			kr.Use(middleware.StaffAuthOptional(jwtSecret))
 			kr.Get("/kitchen/orders/queue", handler.GetKitchenQueue)
 			kr.Post("/kitchen/orders/{id}/status", handler.UpdateKitchenStatus)
+		})
+
+		// Menu Read routes (Accessible by all staff roles & public with restaurant_id)
+		api.Group(func(mr chi.Router) {
+			mr.Use(middleware.StaffAuthOptional(jwtSecret))
+			mr.Get("/restaurant/menu/categories", handler.ListCategories)
+			mr.Get("/restaurant/menu/items", handler.ListMenuItems)
 		})
 
 		// Guard routes (Guard-scoped JWT auth)
@@ -99,10 +105,8 @@ func NewRouter(handler *handlers.APIHandler, repo storage.Repository, jwtSecret 
 			tr.Get("/restaurant/ledger", handler.GetLedgerPayable)
 			tr.Get("/restaurant/settlements", handler.GetSettlements)
 
-			// Menu Management
-			tr.Get("/restaurant/menu/categories", handler.ListCategories)
+			// Menu Management (Mutations require ADMIN/OWNER/MANAGER)
 			tr.Post("/restaurant/menu/categories", handler.CreateCategory)
-			tr.Get("/restaurant/menu/items", handler.ListMenuItems)
 			tr.Post("/restaurant/menu/items", handler.CreateMenuItem)
 			tr.Post("/restaurant/menu/ai-catalog", handler.AICatalogMenu)
 			tr.Post("/restaurant/menu/ai-query", handler.AIQueryMenu)
