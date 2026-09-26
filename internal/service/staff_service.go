@@ -165,9 +165,13 @@ func (s *StaffService) Authenticate(ctx context.Context, identifier, password st
 	// 1. Try finding by email
 	staff, err = s.repo.GetStaffByEmail(ctx, strings.ToLower(trimmedIdentifier))
 	if err != nil || staff == nil {
-		// 2. If restaurant ID provided or identifier looks like an Employee ID (e.g. EMP-...)
+		// 2. If restaurant ID provided, check restaurant-specific employee ID
 		if restaurantID != nil && *restaurantID != uuid.Nil {
 			staff, err = s.repo.GetStaffByEmployeeID(ctx, *restaurantID, strings.ToUpper(trimmedIdentifier))
+		}
+		// 3. Fallback: Check global employee ID across the system
+		if staff == nil {
+			staff, err = s.repo.GetStaffByEmployeeIDGlobal(ctx, strings.ToUpper(trimmedIdentifier))
 		}
 	}
 

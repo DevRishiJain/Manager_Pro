@@ -106,6 +106,7 @@ type Repository interface {
 	GetStaffByID(ctx context.Context, id uuid.UUID) (*restaurant.StaffUser, error)
 	GetStaffByEmail(ctx context.Context, email string) (*restaurant.StaffUser, error)
 	GetStaffByEmployeeID(ctx context.Context, restaurantID uuid.UUID, employeeID string) (*restaurant.StaffUser, error)
+	GetStaffByEmployeeIDGlobal(ctx context.Context, employeeID string) (*restaurant.StaffUser, error)
 	ListStaff(ctx context.Context, restaurantID uuid.UUID) ([]restaurant.StaffUser, error)
 
 	CreateGuard(ctx context.Context, g *restaurant.GuardUser) error

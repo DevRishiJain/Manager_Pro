@@ -854,6 +854,25 @@ func (r *PostgresRepository) GetTableByToken(ctx context.Context, token string) 
 }
 
 func (r *PostgresRepository) ListTables(ctx context.Context, restaurantID uuid.UUID) ([]restaurant.Table, error) {
+	if r.pool != nil {
+		rows, err := r.pool.Query(ctx, `
+			SELECT id, restaurant_id, table_number, table_token, is_active, created_at, updated_at
+			FROM tables
+			WHERE restaurant_id = $1
+			ORDER BY table_number ASC;
+		`, restaurantID)
+		if err == nil {
+			defer rows.Close()
+			var tables []restaurant.Table
+			for rows.Next() {
+				var t restaurant.Table
+				if err := rows.Scan(&t.ID, &t.RestaurantID, &t.TableNumber, &t.TableToken, &t.IsActive, &t.CreatedAt, &t.UpdatedAt); err == nil {
+					tables = append(tables, t)
+				}
+			}
+			return tables, nil
+		}
+	}
 	return r.mem.ListTables(ctx, restaurantID)
 }
 
@@ -921,6 +940,24 @@ func (r *PostgresRepository) GetStaffByEmployeeID(ctx context.Context, restauran
 		}
 	}
 	return r.mem.GetStaffByEmployeeID(ctx, restaurantID, employeeID)
+}
+
+func (r *PostgresRepository) GetStaffByEmployeeIDGlobal(ctx context.Context, employeeID string) (*restaurant.StaffUser, error) {
+	if r.pool != nil {
+		var s restaurant.StaffUser
+		var roleStr string
+		err := r.pool.QueryRow(ctx, `
+			SELECT id, restaurant_id, COALESCE(employee_id, ''), name, phone, email, password_hash, role, is_active, created_at, updated_at
+			FROM staff_users
+			WHERE UPPER(employee_id) = UPPER($1)
+			LIMIT 1;
+		`, employeeID).Scan(&s.ID, &s.RestaurantID, &s.EmployeeID, &s.Name, &s.Phone, &s.Email, &s.PasswordHash, &roleStr, &s.IsActive, &s.CreatedAt, &s.UpdatedAt)
+		if err == nil {
+			s.Role = restaurant.Role(roleStr)
+			return &s, nil
+		}
+	}
+	return r.mem.GetStaffByEmployeeIDGlobal(ctx, employeeID)
 }
 
 func (r *PostgresRepository) ListStaff(ctx context.Context, restaurantID uuid.UUID) ([]restaurant.StaffUser, error) {

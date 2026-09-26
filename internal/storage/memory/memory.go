@@ -5,8 +5,12 @@ import (
 	"errors"
 	"fmt"
 	"sort"
+	"strings"
 	"sync"
 	"time"
+
+	"golang.org/x/crypto/bcrypt"
+	"github.com/devrishijain/table-manager/internal/domain/money"
 
 	"github.com/devrishijain/table-manager/internal/domain/audit"
 	"github.com/devrishijain/table-manager/internal/domain/exitpass"
@@ -71,7 +75,7 @@ type MemoryRepository struct {
 }
 
 func NewMemoryRepository() *MemoryRepository {
-	return &MemoryRepository{
+	repo := &MemoryRepository{
 		restaurants:       make(map[uuid.UUID]*restaurant.Restaurant),
 		tables:            make(map[uuid.UUID]*restaurant.Table),
 		tablesByToken:     make(map[string]*restaurant.Table),
@@ -103,6 +107,8 @@ func NewMemoryRepository() *MemoryRepository {
 		outboxEvents:      make(map[uuid.UUID]*storage.OutboxEvent),
 		webhookEvents:     make(map[string]time.Time),
 	}
+	repo.seedDefaultData()
+	return repo
 }
 
 // Ensure MemoryRepository implements storage.Repository
@@ -404,6 +410,14 @@ func (m *MemoryRepository) CreateAdjustment(ctx context.Context, a *payment.Adju
 	m.mu.Lock()
 	defer m.mu.Unlock()
 
+	if a.Type == payment.AdjustmentTypeOverpaymentCredit {
+		for _, existing := range m.adjustments[a.SessionID] {
+			if existing.Type == payment.AdjustmentTypeOverpaymentCredit {
+				return nil
+			}
+		}
+	}
+
 	cpy := *a
 	m.adjustments[a.SessionID] = append(m.adjustments[a.SessionID], cpy)
 	return nil
@@ -701,6 +715,171 @@ func (m *MemoryRepository) GetStaffByEmployeeID(ctx context.Context, restaurantI
 		}
 	}
 	return nil, ErrNotFound
+}
+
+func (m *MemoryRepository) GetStaffByEmployeeIDGlobal(ctx context.Context, employeeID string) (*restaurant.StaffUser, error) {
+	m.mu.RLock()
+	defer m.mu.RUnlock()
+
+	upper := strings.ToUpper(strings.TrimSpace(employeeID))
+	for _, st := range m.staff {
+		if strings.ToUpper(st.EmployeeID) == upper {
+			cpy := *st
+			return &cpy, nil
+		}
+	}
+	return nil, ErrNotFound
+}
+
+func (m *MemoryRepository) seedDefaultData() {
+	restID := uuid.MustParse("00000000-0000-0000-0000-000000000001")
+	now := time.Now()
+
+	// 1. Default Restaurant
+	rest := &restaurant.Restaurant{
+		ID:                   restID,
+		Name:                 "The Spice Route",
+		GSTIN:                "07AABCG1234F1Z5",
+		CommissionRateBps:    100,
+		SettlementBankDetails: "HDFC Bank • A/C 50200012345678 • IFSC HDFC0000128",
+		Status:               restaurant.StatusActive,
+		Timezone:             "Asia/Kolkata",
+		CreatedAt:            now,
+		UpdatedAt:            now,
+	}
+	m.restaurants[restID] = rest
+
+	// 2. Settings
+	settings := restaurant.DefaultSettings(restID)
+	m.settings[restID] = &settings
+
+	// 3. Tables (12 tables with permanent tokens and demo tokens)
+	for i := 1; i <= 12; i++ {
+		tblID := uuid.New()
+		tblNum := fmt.Sprintf("Table %d", i)
+		token := fmt.Sprintf("TBL-%03d", i)
+		t := &restaurant.Table{
+			ID:           tblID,
+			RestaurantID: restID,
+			TableNumber:  tblNum,
+			TableToken:   token,
+			IsActive:     true,
+			CreatedAt:    now,
+			UpdatedAt:    now,
+		}
+		m.tables[tblID] = t
+		m.tablesByToken[token] = t
+
+		if i == 1 {
+			m.tablesByToken["table-qr-token-spice-route-01"] = t
+		} else if i == 2 {
+			m.tablesByToken["table-qr-token-spice-route-02"] = t
+		}
+	}
+
+	// 4. Menu Categories
+	catStartersID := uuid.New()
+	catMainID := uuid.New()
+	catBreadsID := uuid.New()
+	catDessertsID := uuid.New()
+
+	m.categories[catStartersID] = &restaurant.MenuCategory{
+		ID: catStartersID, RestaurantID: restID, Name: "Starters", DisplayOrder: 1, CreatedAt: now, UpdatedAt: now,
+	}
+	m.categories[catMainID] = &restaurant.MenuCategory{
+		ID: catMainID, RestaurantID: restID, Name: "Main Course", DisplayOrder: 2, CreatedAt: now, UpdatedAt: now,
+	}
+	m.categories[catBreadsID] = &restaurant.MenuCategory{
+		ID: catBreadsID, RestaurantID: restID, Name: "Breads", DisplayOrder: 3, CreatedAt: now, UpdatedAt: now,
+	}
+	m.categories[catDessertsID] = &restaurant.MenuCategory{
+		ID: catDessertsID, RestaurantID: restID, Name: "Desserts", DisplayOrder: 4, CreatedAt: now, UpdatedAt: now,
+	}
+
+	// 5. Menu Items
+	dishes := []struct {
+		catID uuid.UUID
+		name  string
+		desc  string
+		price int64
+	}{
+		{catStartersID, "Murgh Tikka Angara", "Charcoal grilled chicken skewers in hung curd marinade", 44000},
+		{catStartersID, "Crispy Corn Kernels", "Spiced batter-fried golden sweet corn with lime zest", 26000},
+		{catMainID, "Paneer Butter Masala", "Cottage cheese cubes in velvety rich spiced tomato butter gravy", 36000},
+		{catMainID, "Dal Makhani", "Slow-cooked overnight black lentils infused with white churned butter", 28000},
+		{catMainID, "Dum Biryani Awadhi", "Aromatic basmati rice cooked on dum with whole spices and saffron", 39000},
+		{catBreadsID, "Garlic Butter Naan", "Clay oven flatbread infused with roasted garlic flakes and butter", 8000},
+		{catBreadsID, "Laccha Paratha", "Multi-layered flaky whole wheat bread baked in tandoor", 7000},
+		{catDessertsID, "Classic Mango Kulfi", "Slow-reduced milk ice cream flavored with Alphonso mango puree", 18000},
+		{catDessertsID, "Gulab Jamun with Rabri", "Warm milk dumplings steeped in rose cardamom syrup with thickened rabri", 19000},
+	}
+
+	for _, d := range dishes {
+		miID := uuid.New()
+		m.menuItems[miID] = &restaurant.MenuItem{
+			ID:           miID,
+			RestaurantID: restID,
+			CategoryID:   d.catID,
+			Name:         d.name,
+			Description:  d.desc,
+			Price:        money.New(d.price),
+			IsAvailable:  true,
+			HSNSACCode:   "996331",
+			CGSTRateBps:  250,
+			SGSTRateBps:  250,
+			CreatedAt:    now,
+			UpdatedAt:    now,
+		}
+	}
+
+	// 6. Default Staff Roster with password 'password123'
+	pwHashBytes, _ := bcrypt.GenerateFromPassword([]byte("password123"), bcrypt.DefaultCost)
+	pwHash := string(pwHashBytes)
+
+	staffMembers := []struct {
+		empID string
+		name  string
+		email string
+		role  restaurant.Role
+	}{
+		{"EMP-WTR-001", "Aman Verma", "aman.waiter@goldenspoon.com", restaurant.RoleWaiter},
+		{"EMP-CHF-001", "Chef Rajesh", "rajesh.chef@goldenspoon.com", restaurant.RoleKitchen},
+		{"EMP-KIT-001", "Chef Kitchen", "kitchen@goldenspoon.com", restaurant.RoleKitchen},
+		{"EMP-CSH-001", "Sunil Grover", "sunil.cashier@goldenspoon.com", restaurant.RoleCashier},
+		{"EMP-MGR-001", "Priya Nair", "priya.manager@goldenspoon.com", restaurant.RoleManager},
+		{"EMP-ADM-001", "Vikram Malhotra", "owner@goldenspoon.com", restaurant.RoleRestaurantAdmin},
+		{"EMP-GRD-001", "Ramesh Singh", "guard@goldenspoon.com", restaurant.RoleGuard},
+	}
+
+	for _, st := range staffMembers {
+		sID := uuid.New()
+		s := &restaurant.StaffUser{
+			ID:           sID,
+			RestaurantID: restID,
+			EmployeeID:   st.empID,
+			Name:         st.name,
+			Phone:        "+91 98765 43210",
+			Email:        st.email,
+			PasswordHash: pwHash,
+			Role:         st.role,
+			IsActive:     true,
+			CreatedAt:    now,
+			UpdatedAt:    now,
+		}
+		m.staff[sID] = s
+		m.staffByEmail[st.email] = s
+		m.staffByEmployeeID[restID.String()+":"+st.empID] = s
+	}
+
+	// 7. Onboarding Complete
+	m.onboarding[restID] = &restaurant.RestaurantOnboarding{
+		RestaurantID:   restID,
+		CurrentStep:    restaurant.StepGoLive,
+		StepsCompleted: []restaurant.OnboardingStep{restaurant.StepProfileSetup, restaurant.StepTableSetup, restaurant.StepMenuSetup, restaurant.StepStaffSetup, restaurant.StepPaymentSetup, restaurant.StepPolicySetup, restaurant.StepTestOrder, restaurant.StepGoLive},
+		StartedAt:      now,
+		CompletedAt:    &now,
+		UpdatedAt:      now,
+	}
 }
 
 func (m *MemoryRepository) ListStaff(ctx context.Context, restaurantID uuid.UUID) ([]restaurant.StaffUser, error) {

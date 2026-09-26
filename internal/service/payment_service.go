@@ -192,6 +192,29 @@ func (s *PaymentService) ConfirmPayment(ctx context.Context, req payment.Payment
 
 	// Check if fully settled: sum(CONFIRMED) >= final_total
 	if totalPaidMinor >= targetBill.AmountMinorUnits && targetBill.AmountMinorUnits > 0 {
+		// Overpayment handling: create explicit adjustment record if total payments exceed bill and not recorded yet
+		if totalPaidMinor > targetBill.AmountMinorUnits {
+			adjs, _ := s.repo.GetAdjustmentsBySessionID(ctx, sess.ID)
+			hasOverpay := false
+			for _, a := range adjs {
+				if a.Type == payment.AdjustmentTypeOverpaymentCredit {
+					hasOverpay = true
+					break
+				}
+			}
+			if !hasOverpay {
+				overpayMinor := totalPaidMinor - targetBill.AmountMinorUnits
+				_ = s.repo.CreateAdjustment(ctx, &payment.Adjustment{
+					ID:           uuid.New(),
+					SessionID:    sess.ID,
+					RestaurantID: sess.RestaurantID,
+					Type:         payment.AdjustmentTypeOverpaymentCredit,
+					Amount:       money.New(overpayMinor),
+					Notes:        "Automated overpayment credit balance",
+					CreatedAt:    now,
+				})
+			}
+		}
 		// Move session from AWAITING_PAYMENT to PAID
 		if sess.Status != session.StatePaid && sess.Status != session.StateCompleted {
 			sess.Status = session.StatePaid
@@ -202,19 +225,7 @@ func (s *PaymentService) ConfirmPayment(ctx context.Context, req payment.Payment
 			// Check if update succeeded (optimistic lock winner).
 			// If two concurrent payments finish together, only ONE goroutine wins the session transition!
 			if err := s.repo.UpdateSession(ctx, sess); err == nil {
-				// Overpayment handling: create explicit adjustment record
-				if totalPaidMinor > targetBill.AmountMinorUnits {
-					overpayMinor := totalPaidMinor - targetBill.AmountMinorUnits
-					_ = s.repo.CreateAdjustment(ctx, &payment.Adjustment{
-						ID:           uuid.New(),
-						SessionID:    sess.ID,
-						RestaurantID: sess.RestaurantID,
-						Type:         payment.AdjustmentTypeOverpaymentCredit,
-						Amount:       money.New(overpayMinor),
-						Notes:        "Automated overpayment credit balance",
-						CreatedAt:    now,
-					})
-				}
+
 
 				// Calculate Platform Fee Ledger Entry (idempotent)
 				if s.ledgerService != nil {

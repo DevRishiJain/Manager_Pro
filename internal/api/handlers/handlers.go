@@ -2,11 +2,15 @@ package handlers
 
 import (
 	"encoding/json"
+	"fmt"
 	"io"
 	"net/http"
 	"strconv"
 	"strings"
 	"time"
+
+	"golang.org/x/crypto/bcrypt"
+	"github.com/devrishijain/table-manager/pkg/crypto"
 
 	objstore "github.com/devrishijain/table-manager/internal/adapter/storage"
 	"github.com/devrishijain/table-manager/internal/api/middleware"
@@ -33,6 +37,18 @@ type APIHandler struct {
 	objectStore       objstore.ObjectStore
 	repo              storage.Repository
 	webhookSecret     string
+	jwtSecret         []byte
+}
+
+func (h *APIHandler) SetJWTSecret(secret []byte) {
+	h.jwtSecret = secret
+}
+
+func (h *APIHandler) getJWTSecret() []byte {
+	if len(h.jwtSecret) == 0 {
+		return []byte("table-manager-staff-secret-key-32b")
+	}
+	return h.jwtSecret
 }
 
 func (h *APIHandler) SetAICatalogService(aiSvc *service.AICatalogService) {
@@ -94,6 +110,7 @@ type StartSessionRequest struct {
 	TableToken        string `json:"table_token"`
 	DeviceToken       string `json:"device_token"`
 	DisplayName       string `json:"display_name"`
+	CustomerName      string `json:"customer_name"`
 	DeviceFingerprint string `json:"device_fingerprint"`
 }
 
@@ -104,7 +121,15 @@ func (h *APIHandler) StartSession(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	sess, isNew, err := h.sessionService.StartSession(r.Context(), req.TableToken, req.DeviceToken, req.DisplayName, req.DeviceFingerprint)
+	displayName := strings.TrimSpace(req.DisplayName)
+	if displayName == "" && strings.TrimSpace(req.CustomerName) != "" {
+		displayName = strings.TrimSpace(req.CustomerName)
+	}
+	if displayName == "" {
+		displayName = "Guest Diner"
+	}
+
+	sess, isNew, err := h.sessionService.StartSession(r.Context(), req.TableToken, req.DeviceToken, displayName, req.DeviceFingerprint)
 	if err != nil {
 		errorResponse(w, http.StatusBadRequest, err.Error())
 		return
@@ -859,23 +884,37 @@ func (h *APIHandler) CreateMenuItem(w http.ResponseWriter, r *http.Request) {
 		Name        string    `json:"name"`
 		Description string    `json:"description"`
 		PriceMinor  int64     `json:"price_minor"`
+		Price       int64     `json:"price"`
 		CGSTRateBps int64     `json:"cgst_rate_bps"`
 		SGSTRateBps int64     `json:"sgst_rate_bps"`
 	}
-	if err := json.NewDecoder(r.Body).Decode(&item); err != nil || item.Name == "" {
+	if err := json.NewDecoder(r.Body).Decode(&item); err != nil || strings.TrimSpace(item.Name) == "" {
 		errorResponse(w, http.StatusBadRequest, "valid menu item payload required")
 		return
+	}
+	priceMinor := item.PriceMinor
+	if priceMinor == 0 && item.Price != 0 {
+		priceMinor = item.Price
+	}
+	cgst := item.CGSTRateBps
+	if cgst == 0 {
+		cgst = 250 // 2.5% CGST
+	}
+	sgst := item.SGSTRateBps
+	if sgst == 0 {
+		sgst = 250 // 2.5% SGST
 	}
 	mi := &restaurant.MenuItem{
 		ID:           uuid.New(),
 		RestaurantID: claims.RestaurantID,
 		CategoryID:   item.CategoryID,
-		Name:         item.Name,
-		Description:  item.Description,
-		Price:        money.New(item.PriceMinor),
+		Name:         strings.TrimSpace(item.Name),
+		Description:  strings.TrimSpace(item.Description),
+		Price:        money.New(priceMinor),
 		IsAvailable:  true,
-		CGSTRateBps:  item.CGSTRateBps,
-		SGSTRateBps:  item.SGSTRateBps,
+		HSNSACCode:   "996331",
+		CGSTRateBps:  cgst,
+		SGSTRateBps:  sgst,
 		CreatedAt:    time.Now(),
 		UpdatedAt:    time.Now(),
 	}
@@ -1527,3 +1566,391 @@ func (h *APIHandler) AIQueryMenu(w http.ResponseWriter, r *http.Request) {
 }
 
 
+
+// ---------------- Public Restaurant Onboarding & Tables ----------------
+
+type OnboardRestaurantRequest struct {
+	RestaurantName string `json:"restaurant_name"`
+	Slug           string `json:"slug"`
+	LegalName      string `json:"legal_name"`
+	GSTIN          string `json:"gstin"`
+	Phone          string `json:"phone"`
+	Email          string `json:"email"`
+	Address        string `json:"address"`
+	Cuisine        string `json:"cuisine"`
+	Currency       string `json:"currency"`
+	Admin          struct {
+		Name     string `json:"name"`
+		Email    string `json:"email"`
+		Password string `json:"password"`
+		Phone    string `json:"phone"`
+	} `json:"admin"`
+	TableCount int `json:"table_count"`
+	Tables     []struct {
+		TableNumber string `json:"table_number"`
+		TableToken  string `json:"table_token"`
+		Capacity    int    `json:"capacity"`
+	} `json:"tables"`
+	MenuItems []struct {
+		Name        string `json:"name"`
+		Category    string `json:"category"`
+		Price       int64  `json:"price"`
+		PriceMinor  int64  `json:"price_minor"`
+		Dietary     string `json:"dietary"`
+		Description string `json:"description"`
+	} `json:"menu_items"`
+	Staff []struct {
+		Name       string          `json:"name"`
+		Email      string          `json:"email"`
+		Role       restaurant.Role `json:"role"`
+		EmployeeID string          `json:"employee_id"`
+		Password   string          `json:"password"`
+		Phone      string          `json:"phone"`
+	} `json:"staff"`
+}
+
+func (h *APIHandler) OnboardRestaurant(w http.ResponseWriter, r *http.Request) {
+	var req OnboardRestaurantRequest
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		errorResponse(w, http.StatusBadRequest, "invalid request payload")
+		return
+	}
+
+	name := strings.TrimSpace(req.RestaurantName)
+	if name == "" {
+		errorResponse(w, http.StatusBadRequest, "restaurant name is required")
+		return
+	}
+
+	adminEmail := strings.ToLower(strings.TrimSpace(req.Admin.Email))
+	if adminEmail == "" {
+		errorResponse(w, http.StatusBadRequest, "admin email is required")
+		return
+	}
+
+	adminPW := strings.TrimSpace(req.Admin.Password)
+	if adminPW == "" {
+		adminPW = "AdminPass123!"
+	}
+
+	restID := uuid.New()
+	gstin := strings.TrimSpace(req.GSTIN)
+	if gstin == "" {
+		gstin = "07AABCG1234F1Z5"
+	}
+	curr := strings.TrimSpace(req.Currency)
+	if curr == "" {
+		curr = "INR"
+	}
+
+	now := time.Now()
+	rest := &restaurant.Restaurant{
+		ID:                    restID,
+		Name:                  name,
+		GSTIN:                 gstin,
+		CommissionRateBps:     100,
+		SettlementBankDetails: strings.TrimSpace(req.LegalName),
+		Status:                restaurant.StatusActive,
+		Timezone:              "Asia/Kolkata",
+		CreatedAt:             now,
+		UpdatedAt:             now,
+	}
+
+	if err := h.repo.CreateRestaurant(r.Context(), rest); err != nil {
+		errorResponse(w, http.StatusInternalServerError, "failed to register restaurant: "+err.Error())
+		return
+	}
+
+	// 1. Settings
+	settings := restaurant.DefaultSettings(restID)
+	_ = h.repo.UpdateSettings(r.Context(), &settings)
+
+	// 2. Admin User
+	hash, err := bcrypt.GenerateFromPassword([]byte(adminPW), bcrypt.DefaultCost)
+	if err != nil {
+		errorResponse(w, http.StatusInternalServerError, "failed to hash admin password")
+		return
+	}
+
+	adminID := uuid.New()
+	adminName := strings.TrimSpace(req.Admin.Name)
+	if adminName == "" {
+		adminName = "Restaurant Owner"
+	}
+
+	adminUser := &restaurant.StaffUser{
+		ID:           adminID,
+		RestaurantID: restID,
+		EmployeeID:   "EMP-ADM-001",
+		Name:         adminName,
+		Phone:        strings.TrimSpace(req.Admin.Phone),
+		Email:        adminEmail,
+		PasswordHash: string(hash),
+		Role:         restaurant.RoleRestaurantAdmin,
+		IsActive:     true,
+		CreatedAt:    now,
+		UpdatedAt:    now,
+	}
+	if err := h.repo.CreateStaff(r.Context(), adminUser); err != nil {
+		errorResponse(w, http.StatusInternalServerError, "failed to provision admin: "+err.Error())
+		return
+	}
+
+	// 3. Tables
+	createdTables := make([]restaurant.Table, 0)
+	if len(req.Tables) > 0 {
+		for _, t := range req.Tables {
+			tblToken := strings.TrimSpace(t.TableToken)
+			if tblToken == "" {
+				tblToken = fmt.Sprintf("TBL-%s-%03d", restID.String()[:4], len(createdTables)+1)
+			}
+			tblNum := strings.TrimSpace(t.TableNumber)
+			if tblNum == "" {
+				tblNum = fmt.Sprintf("Table %d", len(createdTables)+1)
+			}
+			tbl := &restaurant.Table{
+				ID:           uuid.New(),
+				RestaurantID: restID,
+				TableNumber:  tblNum,
+				TableToken:   tblToken,
+				IsActive:     true,
+				CreatedAt:    now,
+				UpdatedAt:    now,
+			}
+			_ = h.repo.CreateTable(r.Context(), tbl)
+			createdTables = append(createdTables, *tbl)
+		}
+	} else {
+		count := req.TableCount
+		if count <= 0 {
+			count = 8
+		}
+		for i := 1; i <= count; i++ {
+			tblToken := fmt.Sprintf("TBL-%03d", i)
+			tbl := &restaurant.Table{
+				ID:           uuid.New(),
+				RestaurantID: restID,
+				TableNumber:  fmt.Sprintf("Table %d", i),
+				TableToken:   tblToken,
+				IsActive:     true,
+				CreatedAt:    now,
+				UpdatedAt:    now,
+			}
+			_ = h.repo.CreateTable(r.Context(), tbl)
+			createdTables = append(createdTables, *tbl)
+		}
+	}
+
+	// 4. Categories & Menu Items
+	categoryMap := make(map[string]uuid.UUID)
+	dishesCount := 0
+	for i, item := range req.MenuItems {
+		catName := strings.TrimSpace(item.Category)
+		if catName == "" {
+			catName = "Main Course"
+		}
+		catKey := strings.ToLower(catName)
+		catID, exists := categoryMap[catKey]
+		if !exists {
+			catID = uuid.New()
+			cat := &restaurant.MenuCategory{
+				ID:           catID,
+				RestaurantID: restID,
+				Name:         catName,
+				DisplayOrder: len(categoryMap) + 1,
+				CreatedAt:    now,
+				UpdatedAt:    now,
+			}
+			_ = h.repo.CreateCategory(r.Context(), cat)
+			categoryMap[catKey] = catID
+		}
+
+		priceMinor := item.PriceMinor
+		if priceMinor == 0 && item.Price > 0 {
+			if item.Price < 10000 {
+				priceMinor = item.Price * 100
+			} else {
+				priceMinor = item.Price
+			}
+		}
+		if priceMinor <= 0 {
+			priceMinor = 29900
+		}
+
+		desc := strings.TrimSpace(item.Description)
+		if desc == "" {
+			desc = "Chef special handcrafted dish"
+		}
+
+		mi := &restaurant.MenuItem{
+			ID:           uuid.New(),
+			RestaurantID: restID,
+			CategoryID:   catID,
+			Name:         strings.TrimSpace(item.Name),
+			Description:  desc,
+			Price:        money.New(priceMinor),
+			IsAvailable:  true,
+			HSNSACCode:   "996331",
+			CGSTRateBps:  250,
+			SGSTRateBps:  250,
+			CreatedAt:    now.Add(time.Duration(i) * time.Millisecond),
+			UpdatedAt:    now,
+		}
+		_ = h.repo.CreateMenuItem(r.Context(), mi)
+		dishesCount++
+	}
+
+	// 5. Staff Roster
+	staffCount := 0
+	for _, st := range req.Staff {
+		stEmail := strings.ToLower(strings.TrimSpace(st.Email))
+		if stEmail == "" {
+			continue
+		}
+		stPW := strings.TrimSpace(st.Password)
+		if stPW == "" {
+			stPW = "password123"
+		}
+		stHash, err := bcrypt.GenerateFromPassword([]byte(stPW), bcrypt.DefaultCost)
+		if err != nil {
+			continue
+		}
+
+		empID := strings.TrimSpace(st.EmployeeID)
+		if empID == "" {
+			prefix := "WTR"
+			if st.Role == restaurant.RoleKitchen {
+				prefix = "KIT"
+			} else if st.Role == restaurant.RoleCashier {
+				prefix = "CSH"
+			} else if st.Role == restaurant.RoleManager {
+				prefix = "MGR"
+			} else if st.Role == restaurant.RoleGuard {
+				prefix = "GRD"
+			}
+			empID = fmt.Sprintf("EMP-%s-%03d", prefix, staffCount+1)
+		}
+
+		stName := strings.TrimSpace(st.Name)
+		if stName == "" {
+			stName = "Floor Operator"
+		}
+
+		stUser := &restaurant.StaffUser{
+			ID:           uuid.New(),
+			RestaurantID: restID,
+			EmployeeID:   empID,
+			Name:         stName,
+			Phone:        strings.TrimSpace(st.Phone),
+			Email:        stEmail,
+			PasswordHash: string(stHash),
+			Role:         st.Role,
+			IsActive:     true,
+			CreatedAt:    now,
+			UpdatedAt:    now,
+		}
+		_ = h.repo.CreateStaff(r.Context(), stUser)
+		staffCount++
+	}
+
+	// 6. Complete Onboarding
+	_ = h.repo.UpdateOnboarding(r.Context(), &restaurant.RestaurantOnboarding{
+		RestaurantID:   restID,
+		CurrentStep:    restaurant.StepGoLive,
+		StepsCompleted: []restaurant.OnboardingStep{restaurant.StepProfileSetup, restaurant.StepTableSetup, restaurant.StepMenuSetup, restaurant.StepStaffSetup, restaurant.StepPaymentSetup, restaurant.StepPolicySetup, restaurant.StepTestOrder, restaurant.StepGoLive},
+		StartedAt:      now,
+		CompletedAt:    &now,
+		UpdatedAt:      now,
+	})
+
+	// 7. Generate Admin JWT Token
+	token, _ := crypto.GenerateFullStaffJWT(
+		h.getJWTSecret(),
+		adminUser.ID,
+		restID,
+		adminUser.EmployeeID,
+		adminUser.Name,
+		string(adminUser.Role),
+		false,
+		7*24*time.Hour,
+	)
+
+	jsonResponse(w, http.StatusCreated, map[string]interface{}{
+		"token":           token,
+		"restaurant_id":   restID,
+		"restaurant_name": rest.Name,
+		"admin": map[string]interface{}{
+			"id":          adminUser.ID,
+			"name":        adminUser.Name,
+			"email":       adminUser.Email,
+			"employee_id": adminUser.EmployeeID,
+			"role":        adminUser.Role,
+		},
+		"tables_count": len(createdTables),
+		"dishes_count": dishesCount,
+		"staff_count":  staffCount,
+		"tables":       createdTables,
+	})
+}
+
+func (h *APIHandler) CreateTable(w http.ResponseWriter, r *http.Request) {
+	claims, ok := middleware.GetStaffClaimsFromContext(r.Context())
+	if !ok {
+		errorResponse(w, http.StatusUnauthorized, "unauthorized staff")
+		return
+	}
+
+	var req struct {
+		TableNumber string `json:"table_number"`
+		TableToken  string `json:"table_token"`
+		Capacity    int    `json:"capacity"`
+	}
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil || strings.TrimSpace(req.TableNumber) == "" {
+		errorResponse(w, http.StatusBadRequest, "valid table number required")
+		return
+	}
+
+	token := strings.TrimSpace(req.TableToken)
+	if token == "" {
+		randToken, err := crypto.GenerateRandomToken(16)
+		if err != nil {
+			token = fmt.Sprintf("TBL-%s-%d", claims.RestaurantID.String()[:4], time.Now().UnixNano()%10000)
+		} else {
+			token = randToken
+		}
+	}
+
+	now := time.Now()
+	tbl := &restaurant.Table{
+		ID:           uuid.New(),
+		RestaurantID: claims.RestaurantID,
+		TableNumber:  strings.TrimSpace(req.TableNumber),
+		TableToken:   token,
+		IsActive:     true,
+		CreatedAt:    now,
+		UpdatedAt:    now,
+	}
+
+	if err := h.repo.CreateTable(r.Context(), tbl); err != nil {
+		errorResponse(w, http.StatusInternalServerError, err.Error())
+		return
+	}
+
+	jsonResponse(w, http.StatusCreated, tbl)
+}
+
+func (h *APIHandler) ListTables(w http.ResponseWriter, r *http.Request) {
+	claims, ok := middleware.GetStaffClaimsFromContext(r.Context())
+	if !ok {
+		errorResponse(w, http.StatusUnauthorized, "unauthorized staff")
+		return
+	}
+
+	tables, err := h.repo.ListTables(r.Context(), claims.RestaurantID)
+	if err != nil {
+		errorResponse(w, http.StatusInternalServerError, err.Error())
+		return
+	}
+
+	jsonResponse(w, http.StatusOK, tables)
+}

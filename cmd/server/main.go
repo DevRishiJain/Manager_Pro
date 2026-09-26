@@ -119,6 +119,7 @@ func main() {
 		cfg.Razorpay.WebhookSecret,
 	)
 	apiHandler.SetStaffService(staffSvc)
+	apiHandler.SetJWTSecret([]byte(cfg.Auth.JWTSecret))
 	if aiCatalogSvc != nil {
 		apiHandler.SetAICatalogService(aiCatalogSvc)
 	}

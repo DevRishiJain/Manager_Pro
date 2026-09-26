@@ -245,8 +245,6 @@ func (s *OrderService) AcceptOrder(ctx context.Context, orderID, staffID uuid.UU
 		ord.AcceptedByStaffID = &staffID
 	}
 	ord.UpdatedAt = now
-	ord.Version++
-
 	if err := s.repo.UpdateOrder(ctx, ord); err != nil {
 		return nil, err
 	}
@@ -315,8 +313,6 @@ func (s *OrderService) UpdateOrderStatus(ctx context.Context, orderID uuid.UUID,
 	now := time.Now()
 	ord.Status = targetState
 	ord.UpdatedAt = now
-	ord.Version++
-
 	if err := s.repo.UpdateOrder(ctx, ord); err != nil {
 		return nil, err
 	}

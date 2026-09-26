@@ -41,6 +41,8 @@ func NewRouter(handler *handlers.APIHandler, repo storage.Repository, jwtSecret 
 		api.Post("/session/start", handler.StartSession)
 		api.Post("/staff/login", handler.StaffLogin)
 		api.Post("/auth/staff/login", handler.StaffLogin)
+		api.Post("/public/onboard", handler.OnboardRestaurant)
+		api.Post("/auth/restaurant/signup", handler.OnboardRestaurant)
 		api.Post("/webhooks/razorpay", handler.RazorpayWebhook)
 		api.Post("/public/menu/ai-catalog", handler.AICatalogMenu)
 		api.Post("/public/menu/ai-query", handler.AIQueryMenu)
@@ -110,6 +112,10 @@ func NewRouter(handler *handlers.APIHandler, repo storage.Repository, jwtSecret 
 			tr.Post("/restaurant/menu/items", handler.CreateMenuItem)
 			tr.Post("/restaurant/menu/ai-catalog", handler.AICatalogMenu)
 			tr.Post("/restaurant/menu/ai-query", handler.AIQueryMenu)
+
+			// Tables Management
+			tr.Get("/restaurant/tables", handler.ListTables)
+			tr.Post("/restaurant/tables", handler.CreateTable)
 
 			// Staff Management
 			tr.Get("/restaurant/staff", handler.ListStaff)
