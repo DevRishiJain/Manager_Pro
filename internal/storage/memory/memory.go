@@ -326,7 +326,7 @@ func (m *MemoryRepository) ListKitchenQueue(ctx context.Context, restaurantID uu
 
 	var res []order.Order
 	for _, o := range m.orders {
-		if o.RestaurantID == restaurantID && statusMap[o.Status] && time.Since(o.PlacedAt) <= 12*time.Hour {
+		if o.RestaurantID == restaurantID && statusMap[o.Status] && (o.Status != order.StateServed || time.Since(o.PlacedAt) <= 24*time.Hour) {
 			cpy := *o
 			cpy.Items = m.orderItems[o.ID]
 			m.enrichOrderDetails(&cpy)
@@ -342,7 +342,7 @@ func (m *MemoryRepository) ListPendingOrders(ctx context.Context, restaurantID u
 
 	var res []order.Order
 	for _, o := range m.orders {
-		if o.RestaurantID == restaurantID && (o.Status == order.StatePlacedUnverified || o.Status == order.StatePlacedVerified) && time.Since(o.PlacedAt) <= 12*time.Hour {
+		if o.RestaurantID == restaurantID && o.Status == order.StatePlacedUnverified {
 			cpy := *o
 			cpy.Items = m.orderItems[o.ID]
 			m.enrichOrderDetails(&cpy)
@@ -501,13 +501,9 @@ func (m *MemoryRepository) UpdateExitPass(ctx context.Context, ep *exitpass.Exit
 	defer m.mu.Unlock()
 
 	existing, ok := m.exitPasses[ep.ID]
-	if !ok {
-		return ErrNotFound
+	if ok && ep.RawOTP == "" && existing.RawOTP != "" {
+		ep.RawOTP = existing.RawOTP
 	}
-	if existing.Version != ep.Version {
-		return ErrOptimisticLock
-	}
-
 	ep.Version++
 	ep.UpdatedAt = time.Now()
 	cpy := *ep

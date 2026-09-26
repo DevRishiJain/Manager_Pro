@@ -11,7 +11,6 @@ import (
 	"github.com/devrishijain/table-manager/internal/domain/audit"
 	"github.com/devrishijain/table-manager/internal/domain/money"
 	"github.com/devrishijain/table-manager/internal/domain/payment"
-	"github.com/devrishijain/table-manager/internal/domain/restaurant"
 	"github.com/devrishijain/table-manager/internal/domain/session"
 	"github.com/devrishijain/table-manager/internal/storage"
 	"github.com/google/uuid"
@@ -120,6 +119,19 @@ func (s *PaymentService) ConfirmPayment(ctx context.Context, req payment.Payment
 		return nil, ErrSessionNotFound
 	}
 
+	if req.PaymentID == uuid.Nil {
+		pendingPayments, _ := s.repo.GetPaymentsBySessionID(ctx, req.SessionID)
+		for _, pp := range pendingPayments {
+			if pp.Status == payment.StatePendingConfirmation {
+				req.PaymentID = pp.ID
+				break
+			}
+		}
+		if req.PaymentID == uuid.Nil {
+			req.PaymentID = uuid.New()
+		}
+	}
+
 	// Adapter execution
 	confirmedPayment, err := adapter.Confirm(ctx, req)
 	if err != nil {
@@ -129,11 +141,15 @@ func (s *PaymentService) ConfirmPayment(ctx context.Context, req payment.Payment
 	// Update or save confirmed payment
 	existing, err := s.repo.GetPaymentByID(ctx, req.PaymentID)
 	if err == nil && existing != nil {
+		confirmedPayment.ID = existing.ID
 		confirmedPayment.Version = existing.Version
 		if err := s.repo.UpdatePayment(ctx, confirmedPayment); err != nil {
 			return nil, err
 		}
 	} else {
+		if confirmedPayment.ID == uuid.Nil {
+			confirmedPayment.ID = req.PaymentID
+		}
 		if err := s.repo.CreatePayment(ctx, confirmedPayment); err != nil {
 			return nil, err
 		}
@@ -225,25 +241,14 @@ func (s *PaymentService) ConfirmPayment(ctx context.Context, req payment.Payment
 			// Check if update succeeded (optimistic lock winner).
 			// If two concurrent payments finish together, only ONE goroutine wins the session transition!
 			if err := s.repo.UpdateSession(ctx, sess); err == nil {
-
-
 				// Calculate Platform Fee Ledger Entry (idempotent)
 				if s.ledgerService != nil {
 					_, _ = s.ledgerService.ComputeSessionPlatformFee(ctx, sess)
 				}
 
-				// Check restaurant settings for exit guard mode
-				settings, _ := s.repo.GetSettings(ctx, sess.RestaurantID)
-				if settings != nil && settings.ExitVerificationMode == restaurant.ExitVerificationModeGuardCheck {
-					// Issue Exit Pass OTP (idempotent, 1 per session)
-					if s.exitService != nil {
-						_, _, _ = s.exitService.IssueExitPass(ctx, sess.ID)
-					}
-				} else {
-					// Direct auto-complete if no guard verification is configured
-					sess.Status = session.StateCompleted
-					sess.ClosedAt = &now
-					_ = s.repo.UpdateSession(ctx, sess)
+				// Issue Exit Pass OTP so gatepass is active for customer display & waiter verification
+				if s.exitService != nil {
+					_, _, _ = s.exitService.IssueExitPass(ctx, sess.ID)
 				}
 
 				// Outbox event

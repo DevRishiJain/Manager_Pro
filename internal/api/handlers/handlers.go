@@ -14,6 +14,7 @@ import (
 
 	objstore "github.com/devrishijain/table-manager/internal/adapter/storage"
 	"github.com/devrishijain/table-manager/internal/api/middleware"
+	"github.com/devrishijain/table-manager/internal/domain/audit"
 	"github.com/devrishijain/table-manager/internal/domain/money"
 	"github.com/devrishijain/table-manager/internal/domain/order"
 	"github.com/devrishijain/table-manager/internal/domain/payment"
@@ -217,11 +218,20 @@ func (h *APIHandler) GetSessionDetails(w http.ResponseWriter, r *http.Request) {
 	orders, _ := h.orderService.GetOrdersBySessionID(r.Context(), sessionID)
 	payments, _ := h.paymentService.GetPaymentsBySession(r.Context(), sessionID)
 
-	jsonResponse(w, http.StatusOK, map[string]interface{}{
+	resp := map[string]interface{}{
 		"session":  sess,
 		"orders":   orders,
 		"payments": payments,
-	})
+	}
+
+	if h.exitService != nil {
+		if ep, err := h.exitService.GetExitPass(r.Context(), sessionID); err == nil && ep != nil {
+			resp["exit_pass"] = ep
+			resp["exit_otp"] = ep.RawOTP
+		}
+	}
+
+	jsonResponse(w, http.StatusOK, resp)
 }
 
 type CustomerPayRequest struct {
@@ -282,6 +292,53 @@ func (h *APIHandler) GetExitPass(w http.ResponseWriter, r *http.Request) {
 	jsonResponse(w, http.StatusOK, ep)
 }
 
+type RequestAssistancePayload struct {
+	Reason string `json:"reason"`
+}
+
+func (h *APIHandler) RequestAssistance(w http.ResponseWriter, r *http.Request) {
+	sessionIDStr := chi.URLParam(r, "id")
+	sessionID, err := uuid.Parse(sessionIDStr)
+	if err != nil {
+		errorResponse(w, http.StatusBadRequest, "invalid session ID")
+		return
+	}
+
+	var req RequestAssistancePayload
+	_ = json.NewDecoder(r.Body).Decode(&req)
+
+	sess, err := h.sessionService.RequestAssistance(r.Context(), sessionID, req.Reason)
+	if err != nil {
+		errorResponse(w, http.StatusBadRequest, err.Error())
+		return
+	}
+
+	jsonResponse(w, http.StatusOK, map[string]interface{}{
+		"status":                 "ASSISTANCE_REQUESTED",
+		"assistance_reason":      sess.AssistanceReason,
+		"assistance_requested_at": sess.AssistanceRequestedAt,
+	})
+}
+
+func (h *APIHandler) DismissAssistance(w http.ResponseWriter, r *http.Request) {
+	sessionIDStr := chi.URLParam(r, "id")
+	sessionID, err := uuid.Parse(sessionIDStr)
+	if err != nil {
+		errorResponse(w, http.StatusBadRequest, "invalid session ID")
+		return
+	}
+
+	_, err = h.sessionService.DismissAssistance(r.Context(), sessionID)
+	if err != nil {
+		errorResponse(w, http.StatusBadRequest, err.Error())
+		return
+	}
+
+	jsonResponse(w, http.StatusOK, map[string]interface{}{
+		"status": "DISMISSED",
+	})
+}
+
 // ---------------- Staff Handlers ----------------
 
 type VerifyFirstOrderRequest struct {
@@ -339,9 +396,45 @@ func (h *APIHandler) AcceptOrder(w http.ResponseWriter, r *http.Request) {
 	jsonResponse(w, http.StatusOK, ord)
 }
 
+func (h *APIHandler) CancelOrder(w http.ResponseWriter, r *http.Request) {
+	orderIDStr := chi.URLParam(r, "orderId")
+	if orderIDStr == "" {
+		orderIDStr = chi.URLParam(r, "id")
+	}
+	orderID, err := uuid.Parse(orderIDStr)
+	if err != nil {
+		errorResponse(w, http.StatusBadRequest, "invalid order ID")
+		return
+	}
+
+	actorID := uuid.Nil
+	actorType := audit.ActorTypeCustomer
+	if claims, ok := middleware.GetStaffClaimsFromContext(r.Context()); ok {
+		actorID = claims.StaffID
+		actorType = audit.ActorTypeStaff
+	}
+
+	var req struct {
+		Reason string `json:"reason"`
+	}
+	_ = json.NewDecoder(r.Body).Decode(&req)
+	reason := req.Reason
+	if reason == "" {
+		reason = "Customer cancelled uncooked item before kitchen started cooking"
+	}
+
+	ord, err := h.orderService.CancelOrder(r.Context(), orderID, actorID, actorType, reason)
+	if err != nil {
+		errorResponse(w, http.StatusBadRequest, err.Error())
+		return
+	}
+
+	jsonResponse(w, http.StatusOK, ord)
+}
+
 type ConfirmPaymentRequest struct {
-	PaymentID             uuid.UUID      `json:"payment_id"`
-	SessionID             uuid.UUID      `json:"session_id"`
+	PaymentID             *uuid.UUID     `json:"payment_id,omitempty"`
+	SessionID             *uuid.UUID     `json:"session_id,omitempty"`
 	AmountMinor           int64          `json:"amount_minor"`
 	Method                payment.Method `json:"method"`
 	ExternalPlatformName  *string        `json:"external_platform_name,omitempty"`
@@ -370,14 +463,33 @@ func (h *APIHandler) StaffConfirmPayment(w http.ResponseWriter, r *http.Request)
 
 	var req ConfirmPaymentRequest
 	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
-		errorResponse(w, http.StatusBadRequest, "invalid payload")
+		errorResponse(w, http.StatusBadRequest, "invalid payload: "+err.Error())
 		return
+	}
+
+	var sessionID uuid.UUID
+	if req.SessionID != nil && *req.SessionID != uuid.Nil {
+		sessionID = *req.SessionID
+	} else if urlID := chi.URLParam(r, "id"); urlID != "" {
+		if parsed, err := uuid.Parse(urlID); err == nil {
+			sessionID = parsed
+		}
+	}
+
+	if sessionID == uuid.Nil {
+		errorResponse(w, http.StatusBadRequest, "session_id is required")
+		return
+	}
+
+	var paymentID uuid.UUID
+	if req.PaymentID != nil {
+		paymentID = *req.PaymentID
 	}
 
 	now := time.Now()
 	confirmReq := payment.PaymentConfirmationRequest{
-		PaymentID:             req.PaymentID,
-		SessionID:             req.SessionID,
+		PaymentID:             paymentID,
+		SessionID:             sessionID,
 		RestaurantID:          claims.RestaurantID,
 		Amount:                money.New(req.AmountMinor),
 		Method:                req.Method,
@@ -443,14 +555,24 @@ func (h *APIHandler) ForceCloseSession(w http.ResponseWriter, r *http.Request) {
 }
 
 func (h *APIHandler) GetTableDashboard(w http.ResponseWriter, r *http.Request) {
-	claims, ok := middleware.GetStaffClaimsFromContext(r.Context())
-	if !ok {
-		errorResponse(w, http.StatusUnauthorized, "unauthorized staff")
+	var restaurantID uuid.UUID
+	if restParam := r.URL.Query().Get("restaurant_id"); restParam != "" {
+		if parsed, err := uuid.Parse(restParam); err == nil {
+			restaurantID = parsed
+		}
+	}
+	if restaurantID == uuid.Nil {
+		if claims, ok := middleware.GetStaffClaimsFromContext(r.Context()); ok && claims.RestaurantID != uuid.Nil {
+			restaurantID = claims.RestaurantID
+		}
+	}
+	if restaurantID == uuid.Nil {
+		errorResponse(w, http.StatusBadRequest, "restaurant_id is required")
 		return
 	}
 
-	tables, _ := h.repo.ListTables(r.Context(), claims.RestaurantID)
-	activeSessions, _ := h.sessionService.ListActiveSessions(r.Context(), claims.RestaurantID)
+	tables, _ := h.repo.ListTables(r.Context(), restaurantID)
+	activeSessions, _ := h.sessionService.ListActiveSessions(r.Context(), restaurantID)
 
 	sessionByTable := make(map[uuid.UUID]session.DiningSession)
 	for _, s := range activeSessions {
@@ -464,6 +586,8 @@ func (h *APIHandler) GetTableDashboard(w http.ResponseWriter, r *http.Request) {
 		var runMinor int64
 		var guestCount int
 
+		var assistReason string
+		var assistAt *string
 		var sessObj interface{}
 		if s, ok := sessionByTable[t.ID]; ok {
 			isOccupied = true
@@ -475,21 +599,28 @@ func (h *APIHandler) GetTableDashboard(w http.ResponseWriter, r *http.Request) {
 			custPhone = s.CustomerPhone
 			guestCount = s.GuestCount
 			sessObj = s
+			assistReason = s.AssistanceReason
+			if s.AssistanceRequestedAt != nil {
+				formatted := s.AssistanceRequestedAt.Format(time.RFC3339)
+				assistAt = &formatted
+			}
 		}
 
 		entry := map[string]interface{}{
-			"table_id":            t.ID,
-			"table_number":        t.TableNumber,
-			"is_occupied":         isOccupied,
-			"active_session_id":   sessID,
-			"session_status":      sessStatus,
-			"opened_at":           openedAt,
-			"running_total_minor": runMinor,
-			"customer_name":       custName,
-			"customer_phone":      custPhone,
-			"guest_count":         guestCount,
-			"table":               t,
-			"session":             sessObj,
+			"table_id":                t.ID,
+			"table_number":            t.TableNumber,
+			"is_occupied":             isOccupied,
+			"active_session_id":       sessID,
+			"session_status":          sessStatus,
+			"opened_at":               openedAt,
+			"running_total_minor":     runMinor,
+			"customer_name":           custName,
+			"customer_phone":          custPhone,
+			"guest_count":             guestCount,
+			"assistance_reason":       assistReason,
+			"assistance_requested_at": assistAt,
+			"table":                   t,
+			"session":                 sessObj,
 		}
 		board = append(board, entry)
 	}
@@ -521,15 +652,44 @@ func (h *APIHandler) GuardVerifyExit(w http.ResponseWriter, r *http.Request) {
 	jsonResponse(w, http.StatusOK, resp)
 }
 
+func (h *APIHandler) StaffVerifyExit(w http.ResponseWriter, r *http.Request) {
+	claims, ok := middleware.GetStaffClaimsFromContext(r.Context())
+	if !ok {
+		errorResponse(w, http.StatusUnauthorized, "unauthorized staff")
+		return
+	}
+
+	sessionIDStr := chi.URLParam(r, "id")
+	sessionID, err := uuid.Parse(sessionIDStr)
+	if err != nil {
+		errorResponse(w, http.StatusBadRequest, "invalid session ID")
+		return
+	}
+
+	var req struct {
+		OTPCode string `json:"otp_code"`
+	}
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		errorResponse(w, http.StatusBadRequest, "invalid request payload")
+		return
+	}
+
+	resp := h.exitService.VerifyExit(r.Context(), sessionID, req.OTPCode, claims.StaffID)
+	jsonResponse(w, http.StatusOK, resp)
+}
+
 // ---------------- Kitchen KDS Handlers ----------------
 
 func (h *APIHandler) GetKitchenQueue(w http.ResponseWriter, r *http.Request) {
 	var restaurantID uuid.UUID
-	if claims, ok := middleware.GetStaffClaimsFromContext(r.Context()); ok && claims.RestaurantID != uuid.Nil {
-		restaurantID = claims.RestaurantID
-	} else if restParam := r.URL.Query().Get("restaurant_id"); restParam != "" {
+	if restParam := r.URL.Query().Get("restaurant_id"); restParam != "" {
 		if parsed, err := uuid.Parse(restParam); err == nil {
 			restaurantID = parsed
+		}
+	}
+	if restaurantID == uuid.Nil {
+		if claims, ok := middleware.GetStaffClaimsFromContext(r.Context()); ok && claims.RestaurantID != uuid.Nil {
+			restaurantID = claims.RestaurantID
 		}
 	}
 

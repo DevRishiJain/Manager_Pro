@@ -142,7 +142,15 @@ func (s *OrderService) PlaceOrder(ctx context.Context, sessionID uuid.UUID, cart
 	var rawFirstOTP *string
 	var initialOrderStatus order.State
 
-	if sess.Status == session.StateOpen {
+	hasPriorAccepted := false
+	for _, po := range priorOrders {
+		if po.Status != order.StatePlacedUnverified && po.Status != order.StateCancelled {
+			hasPriorAccepted = true
+			break
+		}
+	}
+
+	if sess.Status == session.StateOpen && !hasPriorAccepted {
 		// First order in unverified session: requires staff verification OTP
 		initialOrderStatus = order.StatePlacedUnverified
 		otp, err := exitpass.GenerateNumericOTP(4)
@@ -152,21 +160,37 @@ func (s *OrderService) PlaceOrder(ctx context.Context, sessionID uuid.UUID, cart
 		rawFirstOTP = &otp
 
 		// Save first-order verification OTP
-		ep := &exitpass.ExitPass{
-			ID:               uuid.New(),
-			SessionID:        sess.ID,
-			RestaurantID:     sess.RestaurantID,
-			OTPHash:          exitpass.HashOTP(otp),
-			IssuedAt:         now,
-			ExpiresAt:        now.Add(time.Duration(settings.FirstOrderOTPTTLMinutes) * time.Minute),
-			Status:           exitpass.StateIssued,
-			RequiresOverride: false,
-			CreatedAt:        now,
-			UpdatedAt:        now,
+		existingEp, err := s.repo.GetExitPassBySessionID(ctx, sess.ID)
+		if err == nil && existingEp != nil {
+			// Keep existing OTP permanently for this dining session
+			if existingEp.RawOTP == "" {
+				existingEp.RawOTP = otp
+				existingEp.OTPHash = exitpass.HashOTP(otp)
+			}
+			existingEp.ExpiresAt = now.Add(4 * time.Hour)
+			rawFirstOTP = &existingEp.RawOTP
+			existingEp.Status = exitpass.StateIssued
+			existingEp.UpdatedAt = now
+			_ = s.repo.UpdateExitPass(ctx, existingEp)
+		} else {
+			ep := &exitpass.ExitPass{
+				ID:               uuid.New(),
+				SessionID:        sess.ID,
+				RestaurantID:     sess.RestaurantID,
+				RawOTP:           otp,
+				OTPHash:          exitpass.HashOTP(otp),
+				IssuedAt:         now,
+				ExpiresAt:        now.Add(4 * time.Hour),
+				Status:           exitpass.StateIssued,
+				RequiresOverride: false,
+				CreatedAt:        now,
+				UpdatedAt:        now,
+			}
+			_ = s.repo.CreateExitPass(ctx, ep)
 		}
-		_ = s.repo.CreateExitPass(ctx, ep)
 	} else {
-		// Already verified session
+		// Table order was previously accepted or session already verified:
+		// Places order directly into kitchen queue as PLACED_VERIFIED without waiter re-approval!
 		initialOrderStatus = order.StatePlacedVerified
 	}
 
@@ -413,7 +437,7 @@ func (s *OrderService) GetOrdersBySessionID(ctx context.Context, sessionID uuid.
 }
 
 func (s *OrderService) ListKitchenQueue(ctx context.Context, restaurantID uuid.UUID) ([]order.Order, error) {
-	statuses := []order.State{order.StateAccepted, order.StatePreparing, order.StateReady, order.StateServed}
+	statuses := []order.State{order.StatePlacedVerified, order.StateAccepted, order.StatePreparing, order.StateReady, order.StateServed}
 	return s.repo.ListKitchenQueue(ctx, restaurantID, statuses)
 }
 

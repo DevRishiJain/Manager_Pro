@@ -115,7 +115,7 @@ func (r *PostgresRepository) GetActiveSessionByTableID(ctx context.Context, tabl
 		err := r.pool.QueryRow(ctx, `
 			SELECT id, restaurant_id, table_id, status, opened_at, running_total_minor, final_total_minor, platform_fee_minor, currency, session_token, device_fingerprint, last_activity_at, expiry_deadline, version, created_at, updated_at
 			FROM dining_sessions
-			WHERE table_id = $1 AND status IN ('OPEN', 'OPEN_VERIFIED', 'AWAITING_PAYMENT')
+			WHERE table_id = $1 AND status IN ('OPEN', 'OPEN_VERIFIED', 'AWAITING_PAYMENT', 'PAID')
 			LIMIT 1;
 		`, tableID).Scan(&s.ID, &s.RestaurantID, &s.TableID, &statusStr, &s.OpenedAt, &runMinor, &finMinor, &feeMinor, &curr, &s.SessionToken, &s.DeviceFingerprint, &s.LastActivityAt, &s.ExpiryDeadline, &s.Version, &s.CreatedAt, &s.UpdatedAt)
 		if err == nil {
@@ -143,6 +143,34 @@ func (r *PostgresRepository) UpdateSession(ctx context.Context, s *session.Dinin
 
 
 func (r *PostgresRepository) ListActiveSessions(ctx context.Context, restaurantID uuid.UUID) ([]session.DiningSession, error) {
+	if r.pool != nil {
+		rows, err := r.pool.Query(ctx, `
+			SELECT id, restaurant_id, table_id, status, opened_at, running_total_minor, final_total_minor, platform_fee_minor, currency, session_token, device_fingerprint, last_activity_at, expiry_deadline, version, created_at, updated_at
+			FROM dining_sessions
+			WHERE restaurant_id = $1 
+			  AND status IN ('OPEN', 'OPEN_VERIFIED', 'AWAITING_PAYMENT', 'PAID')
+			ORDER BY opened_at DESC;
+		`, restaurantID)
+		if err == nil {
+			defer rows.Close()
+			var sessions []session.DiningSession
+			for rows.Next() {
+				var s session.DiningSession
+				var statusStr, curr string
+				var runMinor, finMinor, feeMinor int64
+				if err := rows.Scan(&s.ID, &s.RestaurantID, &s.TableID, &statusStr, &s.OpenedAt, &runMinor, &finMinor, &feeMinor, &curr, &s.SessionToken, &s.DeviceFingerprint, &s.LastActivityAt, &s.ExpiryDeadline, &s.Version, &s.CreatedAt, &s.UpdatedAt); err == nil {
+					s.Status = session.State(statusStr)
+					s.RunningTotal = money.New(runMinor)
+					s.FinalTotal = money.New(finMinor)
+					s.PlatformFeeAmount = money.New(feeMinor)
+					sessions = append(sessions, s)
+				}
+			}
+			if len(sessions) > 0 {
+				return sessions, nil
+			}
+		}
+	}
 	return r.mem.ListActiveSessions(ctx, restaurantID)
 }
 
@@ -441,7 +469,7 @@ func (r *PostgresRepository) ListKitchenQueue(ctx context.Context, restaurantID 
 			LEFT JOIN tables t ON t.id = ds.table_id
 			WHERE o.restaurant_id = $1 
 			  AND o.status = ANY($2)
-			  AND o.placed_at >= NOW() - INTERVAL '12 hours'
+			  AND (o.status != 'SERVED' OR o.placed_at >= NOW() - INTERVAL '24 hours')
 			ORDER BY o.sequence_number ASC
 			LIMIT 100;
 		`, restaurantID, statusStrs)
@@ -493,7 +521,7 @@ func (r *PostgresRepository) ListKitchenQueue(ctx context.Context, restaurantID 
 						SpecialInstructions string    `json:"special_instructions"`
 					}
 					var rawItems []rawItem
-					if err := json.Unmarshal(itemsJSON, &rawItems); err == nil {
+					if err := json.Unmarshal(itemsJSON, &rawItems); err == nil && len(rawItems) > 0 {
 						for _, it := range rawItems {
 							o.Items = append(o.Items, order.OrderItem{
 								ID:                  it.ID,
@@ -506,11 +534,18 @@ func (r *PostgresRepository) ListKitchenQueue(ctx context.Context, restaurantID 
 								SpecialInstructions: it.SpecialInstructions,
 							})
 						}
+					} else {
+						var directItems []order.OrderItem
+						if err := json.Unmarshal(itemsJSON, &directItems); err == nil && len(directItems) > 0 {
+							o.Items = directItems
+						}
 					}
 					orders = append(orders, o)
 				}
 			}
-			return orders, nil
+			if len(orders) > 0 {
+				return orders, nil
+			}
 		}
 	}
 	return r.mem.ListKitchenQueue(ctx, restaurantID, statuses)
@@ -540,8 +575,7 @@ func (r *PostgresRepository) ListPendingOrders(ctx context.Context, restaurantID
 			LEFT JOIN dining_sessions ds ON ds.id = o.session_id
 			LEFT JOIN tables t ON t.id = ds.table_id
 			WHERE o.restaurant_id = $1 
-			  AND o.status IN ('PLACED_UNVERIFIED', 'PLACED_VERIFIED')
-			  AND o.placed_at >= NOW() - INTERVAL '12 hours'
+			  AND o.status = 'PLACED_UNVERIFIED'
 			ORDER BY o.placed_at ASC
 			LIMIT 100;
 		`, restaurantID)
@@ -591,7 +625,7 @@ func (r *PostgresRepository) ListPendingOrders(ctx context.Context, restaurantID
 						SpecialInstructions string    `json:"special_instructions"`
 					}
 					var rawItems []rawItem
-					if err := json.Unmarshal(itemsJSON, &rawItems); err == nil {
+					if err := json.Unmarshal(itemsJSON, &rawItems); err == nil && len(rawItems) > 0 {
 						for _, it := range rawItems {
 							o.Items = append(o.Items, order.OrderItem{
 								ID:                  it.ID,
@@ -604,11 +638,18 @@ func (r *PostgresRepository) ListPendingOrders(ctx context.Context, restaurantID
 								SpecialInstructions: it.SpecialInstructions,
 							})
 						}
+					} else {
+						var directItems []order.OrderItem
+						if err := json.Unmarshal(itemsJSON, &directItems); err == nil && len(directItems) > 0 {
+							o.Items = directItems
+						}
 					}
 					orders = append(orders, o)
 				}
 			}
-			return orders, nil
+			if len(orders) > 0 {
+				return orders, nil
+			}
 		}
 	}
 	return r.mem.ListPendingOrders(ctx, restaurantID)
@@ -730,6 +771,9 @@ func (r *PostgresRepository) GetExitPassByID(ctx context.Context, id uuid.UUID) 
 		`, id).Scan(&ep.ID, &ep.SessionID, &ep.RestaurantID, &ep.OTPHash, &statusStr, &ep.ExpiresAt, &ep.CreatedAt, &ep.UpdatedAt)
 		if err == nil {
 			ep.Status = exitpass.State(statusStr)
+			if memEp, mErr := r.mem.GetExitPassByID(ctx, ep.ID); mErr == nil && memEp != nil && memEp.RawOTP != "" {
+				ep.RawOTP = memEp.RawOTP
+			}
 			return &ep, nil
 		}
 	}
@@ -748,21 +792,25 @@ func (r *PostgresRepository) GetExitPassBySessionID(ctx context.Context, session
 		`, sessionID).Scan(&ep.ID, &ep.SessionID, &ep.RestaurantID, &ep.OTPHash, &statusStr, &ep.ExpiresAt, &ep.CreatedAt, &ep.UpdatedAt)
 		if err == nil {
 			ep.Status = exitpass.State(statusStr)
+			if memEp, mErr := r.mem.GetExitPassBySessionID(ctx, sessionID); mErr == nil && memEp != nil && memEp.RawOTP != "" {
+				ep.RawOTP = memEp.RawOTP
+			} else if memEp, mErr := r.mem.GetExitPassByID(ctx, ep.ID); mErr == nil && memEp != nil && memEp.RawOTP != "" {
+				ep.RawOTP = memEp.RawOTP
+			}
 			return &ep, nil
 		}
 	}
 	return r.mem.GetExitPassBySessionID(ctx, sessionID)
 }
 
-
 func (r *PostgresRepository) UpdateExitPass(ctx context.Context, ep *exitpass.ExitPass) error {
 	_ = r.mem.UpdateExitPass(ctx, ep)
 	if r.pool != nil {
 		_, _ = r.pool.Exec(ctx, `
 			UPDATE exit_passes 
-			SET status = $1, updated_at = $2 
-			WHERE id = $3;
-		`, ep.Status, ep.UpdatedAt, ep.ID)
+			SET status = $1, otp_hash = $2, expires_at = $3, updated_at = $4 
+			WHERE id = $5;
+		`, ep.Status, ep.OTPHash, ep.ExpiresAt, ep.UpdatedAt, ep.ID)
 	}
 	return nil
 }

@@ -59,6 +59,7 @@ type ExitPass struct {
 	ID                uuid.UUID  `json:"id"`
 	SessionID         uuid.UUID  `json:"session_id"`
 	RestaurantID      uuid.UUID  `json:"restaurant_id"`
+	RawOTP            string     `json:"otp,omitempty"`
 	OTPHash           string     `json:"-"` // SHA-256 hex string, never plaintext
 	IssuedAt          time.Time  `json:"issued_at"`
 	ExpiresAt         time.Time  `json:"expires_at"`

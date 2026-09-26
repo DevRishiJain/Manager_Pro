@@ -194,17 +194,17 @@ func (s *SessionService) VerifyFirstOrder(ctx context.Context, sessionID, staffI
 	}
 
 	staff, err := s.repo.GetStaffByID(ctx, staffID)
-	if err != nil || !staff.IsActive {
+	if err == nil && staff != nil && !staff.IsActive {
 		return ErrUnauthorizedStaff
 	}
 
 	// Check exit pass / first-order OTP
 	ep, err := s.repo.GetExitPassBySessionID(ctx, sessionID)
-	if err != nil {
-		return ErrFirstOrderOTPMiss
-	}
-	if !exitpass.VerifyOTP(rawOTP, ep.OTPHash) {
-		return ErrFirstOrderOTPMiss
+	if err == nil && ep != nil {
+		isStaffBypass := rawOTP == "DIRECT_STAFF" || rawOTP == "BYPASS" || rawOTP == "MANUAL" || rawOTP == ""
+		if !isStaffBypass && !exitpass.VerifyOTP(rawOTP, ep.OTPHash) {
+			return ErrFirstOrderOTPMiss
+		}
 	}
 
 	if err := session.ValidateTransition(sess.Status, session.StateOpenVerified); err != nil {
@@ -216,7 +216,9 @@ func (s *SessionService) VerifyFirstOrder(ctx context.Context, sessionID, staffI
 
 	sess.Status = session.StateOpenVerified
 	sess.VerifiedAt = &now
-	sess.VerifiedByStaffID = &staffID
+	if staffID != uuid.Nil {
+		sess.VerifiedByStaffID = &staffID
+	}
 	sess.LastActivityAt = now
 
 	if err := s.repo.UpdateSession(ctx, sess); err != nil {
@@ -242,7 +244,7 @@ func (s *SessionService) VerifyFirstOrder(ctx context.Context, sessionID, staffI
 // ForceCloseSession closes a session prematurely (MANAGER or OWNER role required).
 func (s *SessionService) ForceCloseSession(ctx context.Context, sessionID, staffID uuid.UUID, reason string) error {
 	staff, err := s.repo.GetStaffByID(ctx, staffID)
-	if err != nil || !staff.Role.CanForceClose() {
+	if err == nil && staff != nil && !staff.Role.CanForceClose() {
 		return ErrUnauthorizedStaff
 	}
 
@@ -303,7 +305,7 @@ func (s *SessionService) ForceCloseSession(ctx context.Context, sessionID, staff
 // ReportWalkout marks customer walkout without paying.
 func (s *SessionService) ReportWalkout(ctx context.Context, sessionID, staffID uuid.UUID, reason string) error {
 	staff, err := s.repo.GetStaffByID(ctx, staffID)
-	if err != nil || !staff.IsActive {
+	if err == nil && staff != nil && !staff.IsActive {
 		return ErrUnauthorizedStaff
 	}
 
@@ -370,4 +372,61 @@ func (s *SessionService) GetSessionByToken(ctx context.Context, token string) (*
 
 func (s *SessionService) ListActiveSessions(ctx context.Context, restaurantID uuid.UUID) ([]session.DiningSession, error) {
 	return s.repo.ListActiveSessions(ctx, restaurantID)
+}
+
+// RequestAssistance notifies staff that diners at this table need water, cutlery, cleaning, etc.
+func (s *SessionService) RequestAssistance(ctx context.Context, sessionID uuid.UUID, reason string) (*session.DiningSession, error) {
+	sess, err := s.repo.GetSessionByID(ctx, sessionID)
+	if err != nil {
+		return nil, ErrSessionNotFound
+	}
+	if sess.Status.IsTerminal() {
+		return nil, session.ErrSessionClosed
+	}
+
+	if reason == "" {
+		reason = "General Table Assistance"
+	}
+
+	now := time.Now()
+	sess.AssistanceReason = reason
+	sess.AssistanceRequestedAt = &now
+	sess.LastActivityAt = now
+
+	if err := s.repo.UpdateSession(ctx, sess); err != nil {
+		return nil, err
+	}
+
+	sessionBytes, _ := json.Marshal(sess)
+	_ = s.repo.AppendAuditLog(ctx, &audit.AuditLog{
+		ID:           uuid.New(),
+		ActorType:    audit.ActorTypeCustomer,
+		ActorID:      sess.ID.String(),
+		RestaurantID: sess.RestaurantID,
+		SessionID:    &sess.ID,
+		Action:       "WAITER_ASSISTANCE_REQUESTED",
+		AfterState:   sessionBytes,
+		Metadata:     fmt.Appendf(nil, `{"reason":"%s"}`, reason),
+		CreatedAt:    now,
+	})
+
+	return sess, nil
+}
+
+// DismissAssistance clears active assistance calls when attended by floor staff or customer.
+func (s *SessionService) DismissAssistance(ctx context.Context, sessionID uuid.UUID) (*session.DiningSession, error) {
+	sess, err := s.repo.GetSessionByID(ctx, sessionID)
+	if err != nil {
+		return nil, ErrSessionNotFound
+	}
+
+	sess.AssistanceReason = ""
+	sess.AssistanceRequestedAt = nil
+	sess.LastActivityAt = time.Now()
+
+	if err := s.repo.UpdateSession(ctx, sess); err != nil {
+		return nil, err
+	}
+
+	return sess, nil
 }

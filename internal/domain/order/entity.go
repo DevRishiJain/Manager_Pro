@@ -49,6 +49,8 @@ var AllowedOrderTransitions = map[State][]State{
 	},
 	StatePlacedVerified: {
 		StateAccepted,
+		StatePreparing,
+		StateReady,
 		StateRejected,
 		StateCancelled,
 	},

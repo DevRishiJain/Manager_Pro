@@ -48,6 +48,12 @@ func CustomerAuth(repo storage.Repository) func(http.Handler) http.Handler {
 			}
 
 			if sess.Status.IsTerminal() {
+				// Allow read-only GET requests so diners can view completed session, settled bill, and gatepass clearance
+				if r.Method == http.MethodGet {
+					ctx := context.WithValue(r.Context(), SessionContextKey, sess)
+					next.ServeHTTP(w, r.WithContext(ctx))
+					return
+				}
 				http.Error(w, `{"error":"session has closed"}`, http.StatusGone)
 				return
 			}

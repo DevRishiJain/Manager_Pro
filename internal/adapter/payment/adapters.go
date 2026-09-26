@@ -94,9 +94,14 @@ func (a *CashAdapter) Confirm(ctx context.Context, req payment.PaymentConfirmati
 		return nil, ErrMissingStaffActor
 	}
 
+	payID := req.PaymentID
+	if payID == uuid.Nil {
+		payID = uuid.New()
+	}
+
 	now := time.Now()
 	p := &payment.Payment{
-		ID:                 req.PaymentID,
+		ID:                 payID,
 		SessionID:          req.SessionID,
 		RestaurantID:       req.RestaurantID,
 		Method:             payment.MethodCash,
@@ -136,9 +141,14 @@ func (a *RestaurantPOSAdapter) Confirm(ctx context.Context, req payment.PaymentC
 		return nil, ErrMissingStaffActor
 	}
 
+	payID := req.PaymentID
+	if payID == uuid.Nil {
+		payID = uuid.New()
+	}
+
 	now := time.Now()
 	p := &payment.Payment{
-		ID:                    req.PaymentID,
+		ID:                    payID,
 		SessionID:             req.SessionID,
 		RestaurantID:          req.RestaurantID,
 		Method:                payment.MethodRestaurantPOS,

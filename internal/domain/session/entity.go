@@ -120,6 +120,8 @@ type DiningSession struct {
 	DeviceFingerprint  string       `json:"device_fingerprint"`
 	LastActivityAt     time.Time    `json:"last_activity_at"`
 	ExpiryDeadline     time.Time    `json:"expiry_deadline"`
+	AssistanceReason      string       `json:"assistance_reason,omitempty"`
+	AssistanceRequestedAt *time.Time   `json:"assistance_requested_at,omitempty"`
 	CloseReason        *CloseReason `json:"close_reason,omitempty"`
 	ClosedByActorType  *ActorType   `json:"closed_by_actor_type,omitempty"`
 	ClosedByActorID    *string      `json:"closed_by_actor_id,omitempty"`

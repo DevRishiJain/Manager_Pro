@@ -51,20 +51,27 @@ func NewRouter(handler *handlers.APIHandler, repo storage.Repository, jwtSecret 
 		api.Group(func(cr chi.Router) {
 			cr.Use(middleware.CustomerAuth(repo))
 			cr.Post("/session/{id}/orders", handler.PlaceOrder)
+			cr.Post("/session/{id}/orders/{orderId}/cancel", handler.CancelOrder)
 			cr.Get("/session/{id}", handler.GetSessionDetails)
 			cr.Post("/session/{id}/pay", handler.CustomerPay)
 			cr.Get("/session/{id}/exit-pass", handler.GetExitPass)
+			cr.Post("/session/{id}/assistance", handler.RequestAssistance)
+			cr.Post("/session/{id}/assistance/dismiss", handler.DismissAssistance)
 		})
 
 		// Staff routes (Staff JWT auth)
 		api.Group(func(sr chi.Router) {
 			sr.Use(middleware.StaffAuth(jwtSecret))
 			sr.Post("/staff/sessions/{id}/verify-first-order", handler.VerifyFirstOrder)
+			sr.Post("/staff/sessions/{id}/orders", handler.PlaceOrder)
+			sr.Post("/staff/sessions/{id}/verify-exit", handler.StaffVerifyExit)
 			sr.Get("/staff/orders/pending", handler.GetPendingOrders)
 			sr.Post("/staff/orders/{id}/accept", handler.AcceptOrder)
+			sr.Post("/staff/orders/{id}/cancel", handler.CancelOrder)
 			sr.Post("/staff/payments/{id}/confirm", handler.StaffConfirmPayment)
 			sr.Post("/staff/payments/confirm", handler.StaffConfirmPayment)
 			sr.Post("/staff/sessions/{id}/force-close", handler.ForceCloseSession)
+			sr.Post("/staff/sessions/{id}/assistance/dismiss", handler.DismissAssistance)
 			sr.Get("/staff/dashboard/tables", handler.GetTableDashboard)
 		})
 
