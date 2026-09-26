@@ -314,6 +314,8 @@ func (s *OrderService) UpdateOrderStatus(ctx context.Context, orderID uuid.UUID,
 
 	now := time.Now()
 	ord.Status = targetState
+	ord.UpdatedAt = now
+	ord.Version++
 
 	if err := s.repo.UpdateOrder(ctx, ord); err != nil {
 		return nil, err
@@ -397,7 +399,7 @@ func (s *OrderService) GetOrdersBySessionID(ctx context.Context, sessionID uuid.
 }
 
 func (s *OrderService) ListKitchenQueue(ctx context.Context, restaurantID uuid.UUID) ([]order.Order, error) {
-	statuses := []order.State{order.StateAccepted, order.StatePreparing}
+	statuses := []order.State{order.StateAccepted, order.StatePreparing, order.StateReady, order.StateServed}
 	return s.repo.ListKitchenQueue(ctx, restaurantID, statuses)
 }
 
