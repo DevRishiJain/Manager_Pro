@@ -1044,8 +1044,11 @@ func (h *APIHandler) StaffLogin(w http.ResponseWriter, r *http.Request) {
 }
 
 type PendingOrderResponse struct {
-	Order       order.Order `json:"order"`
-	TableNumber string      `json:"table_number"`
+	Order         order.Order `json:"order"`
+	TableNumber   string      `json:"table_number"`
+	CustomerName  string      `json:"customer_name,omitempty"`
+	CustomerPhone string      `json:"customer_phone,omitempty"`
+	GuestCount    int         `json:"guest_count,omitempty"`
 }
 
 func (h *APIHandler) GetPendingOrders(w http.ResponseWriter, r *http.Request) {
@@ -1065,11 +1068,22 @@ func (h *APIHandler) GetPendingOrders(w http.ResponseWriter, r *http.Request) {
 	for i, ord := range orders {
 		tableNum := ord.TableNumber
 		if tableNum == "" {
-			tableNum = "Table"
+			tableNum = "Table 1"
+		}
+		custName := ord.CustomerName
+		if custName == "" {
+			custName = "Guest Diner"
+		}
+		guestCount := ord.GuestCount
+		if guestCount <= 0 {
+			guestCount = 1
 		}
 		res[i] = PendingOrderResponse{
-			Order:       ord,
-			TableNumber: tableNum,
+			Order:         ord,
+			TableNumber:   tableNum,
+			CustomerName:  custName,
+			CustomerPhone: ord.CustomerPhone,
+			GuestCount:    guestCount,
 		}
 	}
 
@@ -1771,7 +1785,7 @@ func (h *APIHandler) OnboardRestaurant(w http.ResponseWriter, r *http.Request) {
 			count = 8
 		}
 		for i := 1; i <= count; i++ {
-			tblToken := fmt.Sprintf("TBL-%03d", i)
+			tblToken := fmt.Sprintf("TBL-%s-%03d", restID.String()[:4], i)
 			tbl := &restaurant.Table{
 				ID:           uuid.New(),
 				RestaurantID: restID,

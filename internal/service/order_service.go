@@ -169,9 +169,18 @@ func (s *OrderService) PlaceOrder(ctx context.Context, sessionID uuid.UUID, cart
 		initialOrderStatus = order.StatePlacedVerified
 	}
 
-	tableNumber := "Table"
+	tableNumber := "Table 1"
 	if tbl, err := s.repo.GetTableByID(ctx, sess.TableID); err == nil && tbl != nil && tbl.TableNumber != "" {
 		tableNumber = tbl.TableNumber
+	}
+	customerName := sess.CustomerName
+	if customerName == "" {
+		customerName = "Guest Diner"
+	}
+	customerPhone := sess.CustomerPhone
+	guestCount := sess.GuestCount
+	if guestCount <= 0 {
+		guestCount = 1
 	}
 
 	newOrder := &order.Order{
@@ -180,6 +189,9 @@ func (s *OrderService) PlaceOrder(ctx context.Context, sessionID uuid.UUID, cart
 		RestaurantID:             sess.RestaurantID,
 		SequenceNumber:           sequenceNum,
 		TableNumber:              tableNumber,
+		CustomerName:             customerName,
+		CustomerPhone:            customerPhone,
+		GuestCount:               guestCount,
 		Status:                   initialOrderStatus,
 		PlacedAt:                 now,
 		Subtotal:                 money.New(subtotalMinor),

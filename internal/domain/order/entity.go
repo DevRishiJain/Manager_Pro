@@ -87,6 +87,9 @@ type Order struct {
 	RestaurantID             uuid.UUID          `json:"restaurant_id"`
 	SequenceNumber           int                `json:"sequence_number"`
 	TableNumber              string             `json:"table_number,omitempty"`
+	CustomerName             string             `json:"customer_name,omitempty"`
+	CustomerPhone            string             `json:"customer_phone,omitempty"`
+	GuestCount               int                `json:"guest_count,omitempty"`
 	Status                   State              `json:"status"`
 	PlacedAt                 time.Time          `json:"placed_at"`
 	AcceptedAt               *time.Time         `json:"accepted_at,omitempty"`

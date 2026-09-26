@@ -237,6 +237,32 @@ func (m *MemoryRepository) CreateOrder(ctx context.Context, o *order.Order, item
 	return nil
 }
 
+func (m *MemoryRepository) enrichOrderDetails(o *order.Order) {
+	if sess, exists := m.sessions[o.SessionID]; exists {
+		if tbl, tblExists := m.tables[sess.TableID]; tblExists && tbl.TableNumber != "" {
+			o.TableNumber = tbl.TableNumber
+		}
+		if o.CustomerName == "" && sess.CustomerName != "" {
+			o.CustomerName = sess.CustomerName
+		}
+		if o.CustomerPhone == "" && sess.CustomerPhone != "" {
+			o.CustomerPhone = sess.CustomerPhone
+		}
+		if o.GuestCount <= 0 && sess.GuestCount > 0 {
+			o.GuestCount = sess.GuestCount
+		}
+	}
+	if o.TableNumber == "" {
+		o.TableNumber = "Table 1"
+	}
+	if o.CustomerName == "" {
+		o.CustomerName = "Guest Diner"
+	}
+	if o.GuestCount <= 0 {
+		o.GuestCount = 1
+	}
+}
+
 func (m *MemoryRepository) GetOrderByID(ctx context.Context, id uuid.UUID) (*order.Order, error) {
 	m.mu.RLock()
 	defer m.mu.RUnlock()
@@ -247,6 +273,7 @@ func (m *MemoryRepository) GetOrderByID(ctx context.Context, id uuid.UUID) (*ord
 	}
 	cpy := *o
 	cpy.Items = m.orderItems[id]
+	m.enrichOrderDetails(&cpy)
 	return &cpy, nil
 }
 
@@ -259,6 +286,7 @@ func (m *MemoryRepository) GetOrdersBySessionID(ctx context.Context, sessionID u
 		if o.SessionID == sessionID {
 			cpy := *o
 			cpy.Items = m.orderItems[o.ID]
+			m.enrichOrderDetails(&cpy)
 			res = append(res, cpy)
 		}
 	}
@@ -298,11 +326,7 @@ func (m *MemoryRepository) ListKitchenQueue(ctx context.Context, restaurantID uu
 		if o.RestaurantID == restaurantID && statusMap[o.Status] && time.Since(o.PlacedAt) <= 12*time.Hour {
 			cpy := *o
 			cpy.Items = m.orderItems[o.ID]
-			if sess, exists := m.sessions[o.SessionID]; exists {
-				if tbl, tblExists := m.tables[sess.TableID]; tblExists {
-					cpy.TableNumber = tbl.TableNumber
-				}
-			}
+			m.enrichOrderDetails(&cpy)
 			res = append(res, cpy)
 		}
 	}
@@ -318,11 +342,7 @@ func (m *MemoryRepository) ListPendingOrders(ctx context.Context, restaurantID u
 		if o.RestaurantID == restaurantID && (o.Status == order.StatePlacedUnverified || o.Status == order.StatePlacedVerified) && time.Since(o.PlacedAt) <= 12*time.Hour {
 			cpy := *o
 			cpy.Items = m.orderItems[o.ID]
-			if sess, exists := m.sessions[o.SessionID]; exists {
-				if tbl, tblExists := m.tables[sess.TableID]; tblExists {
-					cpy.TableNumber = tbl.TableNumber
-				}
-			}
+			m.enrichOrderDetails(&cpy)
 			res = append(res, cpy)
 		}
 	}

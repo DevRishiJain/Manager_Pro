@@ -429,9 +429,14 @@ func (r *PostgresRepository) ListKitchenQueue(ctx context.Context, restaurantID 
 				o.tax_total_minor,
 				o.total_minor,
 				o.version,
-				COALESCE(NULLIF(o.table_number, ''), 'Table') AS table_number,
+				COALESCE(NULLIF(o.table_number, ''), NULLIF(t.table_number, ''), 'Table 1') AS table_number,
+				COALESCE(NULLIF(ds.customer_name, ''), 'Guest Diner') AS customer_name,
+				COALESCE(ds.customer_phone, '') AS customer_phone,
+				COALESCE(NULLIF(ds.guest_count, 0), 1) AS guest_count,
 				COALESCE(o.items_summary, '[]'::jsonb) AS items_json
 			FROM orders o
+			LEFT JOIN dining_sessions ds ON ds.id = o.session_id
+			LEFT JOIN tables t ON t.id = ds.table_id
 			WHERE o.restaurant_id = $1 
 			  AND o.status = ANY($2)
 			  AND o.placed_at >= NOW() - INTERVAL '12 hours'
@@ -461,6 +466,9 @@ func (r *PostgresRepository) ListKitchenQueue(ctx context.Context, restaurantID 
 					&totMinor,
 					&o.Version,
 					&o.TableNumber,
+					&o.CustomerName,
+					&o.CustomerPhone,
+					&o.GuestCount,
 					&itemsJSON,
 				); err == nil {
 					o.Status = order.State(statusStr)
@@ -516,9 +524,14 @@ func (r *PostgresRepository) ListPendingOrders(ctx context.Context, restaurantID
 				o.tax_total_minor,
 				o.total_minor,
 				o.version,
-				COALESCE(NULLIF(o.table_number, ''), 'Table') AS table_number,
+				COALESCE(NULLIF(o.table_number, ''), NULLIF(t.table_number, ''), 'Table 1') AS table_number,
+				COALESCE(NULLIF(ds.customer_name, ''), 'Guest Diner') AS customer_name,
+				COALESCE(ds.customer_phone, '') AS customer_phone,
+				COALESCE(NULLIF(ds.guest_count, 0), 1) AS guest_count,
 				COALESCE(o.items_summary, '[]'::jsonb) AS items_json
 			FROM orders o
+			LEFT JOIN dining_sessions ds ON ds.id = o.session_id
+			LEFT JOIN tables t ON t.id = ds.table_id
 			WHERE o.restaurant_id = $1 
 			  AND o.status IN ('PLACED_UNVERIFIED', 'PLACED_VERIFIED')
 			  AND o.placed_at >= NOW() - INTERVAL '12 hours'
@@ -546,6 +559,9 @@ func (r *PostgresRepository) ListPendingOrders(ctx context.Context, restaurantID
 					&totMinor,
 					&o.Version,
 					&o.TableNumber,
+					&o.CustomerName,
+					&o.CustomerPhone,
+					&o.GuestCount,
 					&itemsJSON,
 				); err == nil {
 					o.Status = order.State(statusStr)
