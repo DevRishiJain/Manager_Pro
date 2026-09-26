@@ -103,7 +103,7 @@ func TestProductionSimulatedE2E(t *testing.T) {
 
 	// 3. Customer Scans QR and Starts Session
 	// Device 1 opens table session
-	sess, isNew, err := sessionSvc.StartSession(ctx, tableToken, "device-1", "Aman", "fp-hash-1")
+	sess, isNew, err := sessionSvc.StartSession(ctx, tableToken, "device-1", "Aman", "+919876543210", 4, "fp-hash-1")
 	if err != nil || !isNew {
 		t.Fatalf("session start failed: %v", err)
 	}
@@ -112,11 +112,11 @@ func TestProductionSimulatedE2E(t *testing.T) {
 	}
 
 	// Device 2 & Device 3 join the same table session!
-	sessD2, isNewD2, err := sessionSvc.StartSession(ctx, tableToken, "device-2", "Riya", "fp-hash-2")
+	sessD2, isNewD2, err := sessionSvc.StartSession(ctx, tableToken, "device-2", "Riya", "+919876543211", 4, "fp-hash-2")
 	if err != nil || isNewD2 || sessD2.ID != sess.ID {
 		t.Fatalf("multi-device join Device 2 failed: %v", err)
 	}
-	sessD3, isNewD3, err := sessionSvc.StartSession(ctx, tableToken, "device-3", "Sameer", "fp-hash-3")
+	sessD3, isNewD3, err := sessionSvc.StartSession(ctx, tableToken, "device-3", "Sameer", "+919876543212", 4, "fp-hash-3")
 	if err != nil || isNewD3 || sessD3.ID != sess.ID {
 		t.Fatalf("multi-device join Device 3 failed: %v", err)
 	}

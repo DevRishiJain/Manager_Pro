@@ -54,7 +54,7 @@ func TestConcurrentTableQRScansOneSessionWinner(t *testing.T) {
 		go func() {
 			defer wg.Done()
 			devToken := fmt.Sprintf("device-%d", idx)
-			s, isNew, err := sessionSvc.StartSession(context.Background(), tableToken, devToken, fmt.Sprintf("Guest %d", idx), "fp-mock")
+			s, isNew, err := sessionSvc.StartSession(context.Background(), tableToken, devToken, fmt.Sprintf("Guest %d", idx), "+919876543210", 2, "fp-mock")
 			results[idx] = scanResult{session: s, isNew: isNew, err: err}
 		}()
 	}

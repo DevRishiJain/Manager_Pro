@@ -18,6 +18,7 @@ import (
 	"github.com/devrishijain/table-manager/internal/domain/order"
 	"github.com/devrishijain/table-manager/internal/domain/payment"
 	"github.com/devrishijain/table-manager/internal/domain/restaurant"
+	"github.com/devrishijain/table-manager/internal/domain/session"
 	"github.com/devrishijain/table-manager/internal/service"
 	"github.com/devrishijain/table-manager/internal/storage"
 	"github.com/go-chi/chi/v5"
@@ -111,6 +112,10 @@ type StartSessionRequest struct {
 	DeviceToken       string `json:"device_token"`
 	DisplayName       string `json:"display_name"`
 	CustomerName      string `json:"customer_name"`
+	CustomerPhone     string `json:"customer_phone"`
+	PhoneNumber       string `json:"phone_number"`
+	GuestCount        int    `json:"guest_count"`
+	NumberOfGuests    int    `json:"no_of_guests"`
 	DeviceFingerprint string `json:"device_fingerprint"`
 }
 
@@ -129,7 +134,20 @@ func (h *APIHandler) StartSession(w http.ResponseWriter, r *http.Request) {
 		displayName = "Guest Diner"
 	}
 
-	sess, isNew, err := h.sessionService.StartSession(r.Context(), req.TableToken, req.DeviceToken, displayName, req.DeviceFingerprint)
+	customerPhone := strings.TrimSpace(req.CustomerPhone)
+	if customerPhone == "" {
+		customerPhone = strings.TrimSpace(req.PhoneNumber)
+	}
+
+	guestCount := req.GuestCount
+	if guestCount <= 0 && req.NumberOfGuests > 0 {
+		guestCount = req.NumberOfGuests
+	}
+	if guestCount <= 0 {
+		guestCount = 2
+	}
+
+	sess, isNew, err := h.sessionService.StartSession(r.Context(), req.TableToken, req.DeviceToken, displayName, customerPhone, guestCount, req.DeviceFingerprint)
 	if err != nil {
 		errorResponse(w, http.StatusBadRequest, err.Error())
 		return
@@ -427,16 +445,44 @@ func (h *APIHandler) GetTableDashboard(w http.ResponseWriter, r *http.Request) {
 	tables, _ := h.repo.ListTables(r.Context(), claims.RestaurantID)
 	activeSessions, _ := h.sessionService.ListActiveSessions(r.Context(), claims.RestaurantID)
 
-	sessionByTable := make(map[uuid.UUID]interface{})
+	sessionByTable := make(map[uuid.UUID]session.DiningSession)
 	for _, s := range activeSessions {
 		sessionByTable[s.TableID] = s
 	}
 
 	var board []map[string]interface{}
 	for _, t := range tables {
+		var isOccupied bool
+		var sessID, sessStatus, openedAt, custName, custPhone string
+		var runMinor int64
+		var guestCount int
+
+		var sessObj interface{}
+		if s, ok := sessionByTable[t.ID]; ok {
+			isOccupied = true
+			sessID = s.ID.String()
+			sessStatus = string(s.Status)
+			openedAt = s.OpenedAt.Format(time.RFC3339)
+			runMinor = s.RunningTotal.AmountMinorUnits
+			custName = s.CustomerName
+			custPhone = s.CustomerPhone
+			guestCount = s.GuestCount
+			sessObj = s
+		}
+
 		entry := map[string]interface{}{
-			"table":   t,
-			"session": sessionByTable[t.ID],
+			"table_id":            t.ID,
+			"table_number":        t.TableNumber,
+			"is_occupied":         isOccupied,
+			"active_session_id":   sessID,
+			"session_status":      sessStatus,
+			"opened_at":           openedAt,
+			"running_total_minor": runMinor,
+			"customer_name":       custName,
+			"customer_phone":      custPhone,
+			"guest_count":         guestCount,
+			"table":               t,
+			"session":             sessObj,
 		}
 		board = append(board, entry)
 	}
@@ -506,10 +552,9 @@ func (h *APIHandler) UpdateKitchenStatus(w http.ResponseWriter, r *http.Request)
 		return
 	}
 
-	claims, ok := middleware.GetStaffClaimsFromContext(r.Context())
-	if !ok {
-		errorResponse(w, http.StatusUnauthorized, "unauthorized staff")
-		return
+	var staffID uuid.UUID
+	if claims, ok := middleware.GetStaffClaimsFromContext(r.Context()); ok && claims.StaffID != uuid.Nil {
+		staffID = claims.StaffID
 	}
 
 	var req UpdateKitchenStatusRequest
@@ -518,7 +563,7 @@ func (h *APIHandler) UpdateKitchenStatus(w http.ResponseWriter, r *http.Request)
 		return
 	}
 
-	ord, err := h.orderService.UpdateOrderStatus(r.Context(), orderID, req.Status, claims.StaffID)
+	ord, err := h.orderService.UpdateOrderStatus(r.Context(), orderID, req.Status, staffID)
 	if err != nil {
 		errorResponse(w, http.StatusBadRequest, err.Error())
 		return

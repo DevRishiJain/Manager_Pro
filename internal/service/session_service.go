@@ -39,7 +39,7 @@ func NewSessionService(repo storage.Repository) *SessionService {
 // - If policy is SHARED_TABLE_SESSION: joins participant and returns current session.
 // - If policy is SINGLE_DEVICE_SESSION: rejects secondary joins.
 // If no active session exists: creates a fresh DiningSession in StateOpen.
-func (s *SessionService) StartSession(ctx context.Context, tableToken, deviceToken, displayName, deviceFingerprint string) (*session.DiningSession, bool, error) {
+func (s *SessionService) StartSession(ctx context.Context, tableToken, deviceToken, displayName, customerPhone string, guestCount int, deviceFingerprint string) (*session.DiningSession, bool, error) {
 	table, err := s.repo.GetTableByToken(ctx, tableToken)
 	if err != nil || !table.IsActive {
 		return nil, false, ErrInvalidTableQR
@@ -68,13 +68,29 @@ func (s *SessionService) StartSession(ctx context.Context, tableToken, deviceTok
 			}
 		}
 
+		// Update guest count or contact info if previously unset
+		if activeSession.CustomerName == "" || activeSession.CustomerName == "Guest Diner" {
+			if displayName != "" && displayName != "Guest Diner" {
+				activeSession.CustomerName = displayName
+			}
+		}
+		if activeSession.CustomerPhone == "" && customerPhone != "" {
+			activeSession.CustomerPhone = customerPhone
+		}
+		if activeSession.GuestCount <= 0 && guestCount > 0 {
+			activeSession.GuestCount = guestCount
+		}
+		_ = s.repo.UpdateSession(ctx, activeSession)
+
 		// Add as participant to shared session
 		participant := &session.SessionParticipant{
-			ID:          uuid.New(),
-			SessionID:   activeSession.ID,
-			DeviceToken: deviceToken,
-			DisplayName: displayName,
-			JoinedAt:    time.Now(),
+			ID:            uuid.New(),
+			SessionID:     activeSession.ID,
+			DeviceToken:   deviceToken,
+			DisplayName:   displayName,
+			CustomerPhone: customerPhone,
+			GuestCount:    guestCount,
+			JoinedAt:      time.Now(),
 		}
 		_ = s.repo.AddParticipant(ctx, participant)
 
@@ -87,11 +103,17 @@ func (s *SessionService) StartSession(ctx context.Context, tableToken, deviceTok
 		return nil, false, err
 	}
 
+	if guestCount <= 0 {
+		guestCount = 2
+	}
 	now := time.Now()
 	newSession := &session.DiningSession{
 		ID:                uuid.New(),
 		RestaurantID:      table.RestaurantID,
 		TableID:           table.ID,
+		CustomerName:      displayName,
+		CustomerPhone:     customerPhone,
+		GuestCount:        guestCount,
 		Status:            session.StateOpen,
 		OpenedAt:          now,
 		RunningTotal:      money.Zero(),
@@ -119,11 +141,13 @@ func (s *SessionService) StartSession(ctx context.Context, tableToken, deviceTok
 
 	// Register initial participant
 	_ = s.repo.AddParticipant(ctx, &session.SessionParticipant{
-		ID:          uuid.New(),
-		SessionID:   newSession.ID,
-		DeviceToken: deviceToken,
-		DisplayName: displayName,
-		JoinedAt:    now,
+		ID:            uuid.New(),
+		SessionID:     newSession.ID,
+		DeviceToken:   deviceToken,
+		DisplayName:   displayName,
+		CustomerPhone: customerPhone,
+		GuestCount:    guestCount,
+		JoinedAt:      now,
 	})
 
 	// Append Audit Log
