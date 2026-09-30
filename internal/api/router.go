@@ -99,7 +99,7 @@ func NewRouter(handler *handlers.APIHandler, repo storage.Repository, jwtSecret 
 		api.Group(func(tr chi.Router) {
 			tr.Use(middleware.StaffAuth(jwtSecret))
 			tr.Use(middleware.RequireRole("RESTAURANT_ADMIN", "RESTAURANT_OWNER", "MANAGER"))
-			
+
 			// Dashboard Overview & Performance (§8A)
 			tr.Get("/restaurant/dashboard/overview", handler.GetDashboardOverview)
 			tr.Get("/restaurant/analytics/today", handler.GetTodayAnalytics)
@@ -109,10 +109,11 @@ func NewRouter(handler *handlers.APIHandler, repo storage.Repository, jwtSecret 
 			tr.Get("/restaurant/analytics/forecast", handler.GetSalesForecast)
 			tr.Get("/restaurant/analytics/table-performance", handler.GetTablePerformance)
 			tr.Get("/restaurant/analytics/menu-performance", handler.GetMenuPerformance)
-			
+
 			// Ledger & Settlements (§6, §6A)
 			tr.Get("/restaurant/ledger", handler.GetLedgerPayable)
 			tr.Get("/restaurant/settlements", handler.GetSettlements)
+			tr.Get("/restaurant/orders", handler.GetRestaurantOrders)
 
 			// Menu Management (Mutations require ADMIN/OWNER/MANAGER)
 			tr.Post("/restaurant/menu/categories", handler.CreateCategory)

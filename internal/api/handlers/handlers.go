@@ -1189,9 +1189,9 @@ func (h *APIHandler) CreateStaff(w http.ResponseWriter, r *http.Request) {
 }
 
 type StaffLoginRequest struct {
-	Identifier   string     `json:"identifier"`
-	Password     string     `json:"password"`
-	RestaurantID *uuid.UUID `json:"restaurant_id,omitempty"`
+	Identifier   string `json:"identifier"`
+	Password     string `json:"password"`
+	RestaurantID string `json:"restaurant_id,omitempty"`
 }
 
 func (h *APIHandler) StaffLogin(w http.ResponseWriter, r *http.Request) {
@@ -1201,7 +1201,14 @@ func (h *APIHandler) StaffLogin(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	result, err := h.getStaffService().Authenticate(r.Context(), req.Identifier, req.Password, req.RestaurantID)
+	var restID *uuid.UUID
+	if strings.TrimSpace(req.RestaurantID) != "" {
+		if parsed, err := uuid.Parse(strings.TrimSpace(req.RestaurantID)); err == nil && parsed != uuid.Nil {
+			restID = &parsed
+		}
+	}
+
+	result, err := h.getStaffService().Authenticate(r.Context(), req.Identifier, req.Password, restID)
 	if err != nil {
 		errorResponse(w, http.StatusUnauthorized, err.Error())
 		return
@@ -1257,6 +1264,40 @@ func (h *APIHandler) GetPendingOrders(w http.ResponseWriter, r *http.Request) {
 	}
 
 	jsonResponse(w, http.StatusOK, res)
+}
+
+func (h *APIHandler) GetRestaurantOrders(w http.ResponseWriter, r *http.Request) {
+	var restaurantID uuid.UUID
+	if restParam := r.URL.Query().Get("restaurant_id"); restParam != "" {
+		if parsed, err := uuid.Parse(restParam); err == nil {
+			restaurantID = parsed
+		}
+	}
+	if restaurantID == uuid.Nil {
+		if claims, ok := middleware.GetStaffClaimsFromContext(r.Context()); ok && claims.RestaurantID != uuid.Nil {
+			restaurantID = claims.RestaurantID
+		}
+	}
+
+	if restaurantID == uuid.Nil {
+		errorResponse(w, http.StatusBadRequest, "restaurant_id is required")
+		return
+	}
+
+	limit := 100
+	if lStr := r.URL.Query().Get("limit"); lStr != "" {
+		if parsed, err := strconv.Atoi(lStr); err == nil && parsed > 0 {
+			limit = parsed
+		}
+	}
+
+	orders, err := h.orderService.ListOrders(r.Context(), restaurantID, limit)
+	if err != nil {
+		errorResponse(w, http.StatusInternalServerError, err.Error())
+		return
+	}
+
+	jsonResponse(w, http.StatusOK, orders)
 }
 
 func (h *APIHandler) GetSettings(w http.ResponseWriter, r *http.Request) {

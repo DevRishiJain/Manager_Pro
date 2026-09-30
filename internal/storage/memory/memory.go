@@ -355,6 +355,28 @@ func (m *MemoryRepository) ListPendingOrders(ctx context.Context, restaurantID u
 	return res, nil
 }
 
+func (m *MemoryRepository) ListOrders(ctx context.Context, restaurantID uuid.UUID, limit int) ([]order.Order, error) {
+	m.mu.RLock()
+	defer m.mu.RUnlock()
+
+	var res []order.Order
+	for _, o := range m.orders {
+		if o.RestaurantID == restaurantID {
+			cpy := *o
+			cpy.Items = m.orderItems[o.ID]
+			m.enrichOrderDetails(&cpy)
+			res = append(res, cpy)
+		}
+	}
+	sort.Slice(res, func(i, j int) bool {
+		return res[i].PlacedAt.After(res[j].PlacedAt)
+	})
+	if limit > 0 && len(res) > limit {
+		res = res[:limit]
+	}
+	return res, nil
+}
+
 // ---------------- Payment Methods ----------------
 
 func (m *MemoryRepository) CreatePayment(ctx context.Context, p *payment.Payment) error {

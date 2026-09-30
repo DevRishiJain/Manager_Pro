@@ -54,10 +54,14 @@ func (r *PostgresRepository) CreateSession(ctx context.Context, s *session.Dinin
 			expiry = openedAt.Add(3 * time.Hour)
 		}
 		_, err := r.pool.Exec(ctx, `
-			INSERT INTO dining_sessions (id, restaurant_id, table_id, status, opened_at, running_total_minor, final_total_minor, platform_fee_minor, currency, session_token, device_fingerprint, last_activity_at, expiry_deadline, version, created_at, updated_at)
-			VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16)
+			INSERT INTO dining_sessions (
+				id, restaurant_id, table_id, status, opened_at, running_total_minor, final_total_minor, platform_fee_minor, 
+				currency, session_token, device_fingerprint, last_activity_at, expiry_deadline, version, created_at, updated_at,
+				customer_name, customer_phone, guest_count, assistance_reason, assistance_requested_at
+			)
+			VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, $17, $18, $19, $20, $21)
 			ON CONFLICT (id) DO NOTHING;
-		`, s.ID, s.RestaurantID, s.TableID, string(s.Status), openedAt, s.RunningTotal.AmountMinorUnits, s.FinalTotal.AmountMinorUnits, s.PlatformFeeAmount.AmountMinorUnits, curr, s.SessionToken, s.DeviceFingerprint, lastAct, expiry, s.Version, s.CreatedAt, s.UpdatedAt)
+		`, s.ID, s.RestaurantID, s.TableID, string(s.Status), openedAt, s.RunningTotal.AmountMinorUnits, s.FinalTotal.AmountMinorUnits, s.PlatformFeeAmount.AmountMinorUnits, curr, s.SessionToken, s.DeviceFingerprint, lastAct, expiry, s.Version, s.CreatedAt, s.UpdatedAt, s.CustomerName, s.CustomerPhone, s.GuestCount, s.AssistanceReason, s.AssistanceRequestedAt)
 		if err != nil {
 			return err
 		}
@@ -71,10 +75,11 @@ func (r *PostgresRepository) GetSessionByID(ctx context.Context, id uuid.UUID) (
 		var statusStr, curr string
 		var runMinor, finMinor, feeMinor int64
 		err := r.pool.QueryRow(ctx, `
-			SELECT id, restaurant_id, table_id, status, opened_at, running_total_minor, final_total_minor, platform_fee_minor, currency, session_token, device_fingerprint, last_activity_at, expiry_deadline, version, created_at, updated_at
+			SELECT id, restaurant_id, table_id, status, opened_at, running_total_minor, final_total_minor, platform_fee_minor, currency, session_token, device_fingerprint, last_activity_at, expiry_deadline, version, created_at, updated_at,
+			       COALESCE(customer_name, ''), COALESCE(customer_phone, ''), COALESCE(guest_count, 1), COALESCE(assistance_reason, ''), assistance_requested_at
 			FROM dining_sessions
 			WHERE id = $1;
-		`, id).Scan(&s.ID, &s.RestaurantID, &s.TableID, &statusStr, &s.OpenedAt, &runMinor, &finMinor, &feeMinor, &curr, &s.SessionToken, &s.DeviceFingerprint, &s.LastActivityAt, &s.ExpiryDeadline, &s.Version, &s.CreatedAt, &s.UpdatedAt)
+		`, id).Scan(&s.ID, &s.RestaurantID, &s.TableID, &statusStr, &s.OpenedAt, &runMinor, &finMinor, &feeMinor, &curr, &s.SessionToken, &s.DeviceFingerprint, &s.LastActivityAt, &s.ExpiryDeadline, &s.Version, &s.CreatedAt, &s.UpdatedAt, &s.CustomerName, &s.CustomerPhone, &s.GuestCount, &s.AssistanceReason, &s.AssistanceRequestedAt)
 		if err == nil {
 			s.Status = session.State(statusStr)
 			s.RunningTotal = money.New(runMinor)
@@ -92,10 +97,11 @@ func (r *PostgresRepository) GetSessionByToken(ctx context.Context, token string
 		var statusStr, curr string
 		var runMinor, finMinor, feeMinor int64
 		err := r.pool.QueryRow(ctx, `
-			SELECT id, restaurant_id, table_id, status, opened_at, running_total_minor, final_total_minor, platform_fee_minor, currency, session_token, device_fingerprint, last_activity_at, expiry_deadline, version, created_at, updated_at
+			SELECT id, restaurant_id, table_id, status, opened_at, running_total_minor, final_total_minor, platform_fee_minor, currency, session_token, device_fingerprint, last_activity_at, expiry_deadline, version, created_at, updated_at,
+			       COALESCE(customer_name, ''), COALESCE(customer_phone, ''), COALESCE(guest_count, 1), COALESCE(assistance_reason, ''), assistance_requested_at
 			FROM dining_sessions
 			WHERE session_token = $1;
-		`, token).Scan(&s.ID, &s.RestaurantID, &s.TableID, &statusStr, &s.OpenedAt, &runMinor, &finMinor, &feeMinor, &curr, &s.SessionToken, &s.DeviceFingerprint, &s.LastActivityAt, &s.ExpiryDeadline, &s.Version, &s.CreatedAt, &s.UpdatedAt)
+		`, token).Scan(&s.ID, &s.RestaurantID, &s.TableID, &statusStr, &s.OpenedAt, &runMinor, &finMinor, &feeMinor, &curr, &s.SessionToken, &s.DeviceFingerprint, &s.LastActivityAt, &s.ExpiryDeadline, &s.Version, &s.CreatedAt, &s.UpdatedAt, &s.CustomerName, &s.CustomerPhone, &s.GuestCount, &s.AssistanceReason, &s.AssistanceRequestedAt)
 		if err == nil {
 			s.Status = session.State(statusStr)
 			s.RunningTotal = money.New(runMinor)
@@ -113,11 +119,12 @@ func (r *PostgresRepository) GetActiveSessionByTableID(ctx context.Context, tabl
 		var statusStr, curr string
 		var runMinor, finMinor, feeMinor int64
 		err := r.pool.QueryRow(ctx, `
-			SELECT id, restaurant_id, table_id, status, opened_at, running_total_minor, final_total_minor, platform_fee_minor, currency, session_token, device_fingerprint, last_activity_at, expiry_deadline, version, created_at, updated_at
+			SELECT id, restaurant_id, table_id, status, opened_at, running_total_minor, final_total_minor, platform_fee_minor, currency, session_token, device_fingerprint, last_activity_at, expiry_deadline, version, created_at, updated_at,
+			       COALESCE(customer_name, ''), COALESCE(customer_phone, ''), COALESCE(guest_count, 1), COALESCE(assistance_reason, ''), assistance_requested_at
 			FROM dining_sessions
 			WHERE table_id = $1 AND status IN ('OPEN', 'OPEN_VERIFIED', 'AWAITING_PAYMENT', 'PAID')
 			LIMIT 1;
-		`, tableID).Scan(&s.ID, &s.RestaurantID, &s.TableID, &statusStr, &s.OpenedAt, &runMinor, &finMinor, &feeMinor, &curr, &s.SessionToken, &s.DeviceFingerprint, &s.LastActivityAt, &s.ExpiryDeadline, &s.Version, &s.CreatedAt, &s.UpdatedAt)
+		`, tableID).Scan(&s.ID, &s.RestaurantID, &s.TableID, &statusStr, &s.OpenedAt, &runMinor, &finMinor, &feeMinor, &curr, &s.SessionToken, &s.DeviceFingerprint, &s.LastActivityAt, &s.ExpiryDeadline, &s.Version, &s.CreatedAt, &s.UpdatedAt, &s.CustomerName, &s.CustomerPhone, &s.GuestCount, &s.AssistanceReason, &s.AssistanceRequestedAt)
 		if err == nil {
 			s.Status = session.State(statusStr)
 			s.RunningTotal = money.New(runMinor)
@@ -134,18 +141,19 @@ func (r *PostgresRepository) UpdateSession(ctx context.Context, s *session.Dinin
 	if r.pool != nil {
 		_, _ = r.pool.Exec(ctx, `
 			UPDATE dining_sessions 
-			SET status = $1, running_total_minor = $2, final_total_minor = $3, platform_fee_minor = $4, version = $5, updated_at = $6 
-			WHERE id = $7;
-		`, string(s.Status), s.RunningTotal.AmountMinorUnits, s.FinalTotal.AmountMinorUnits, s.PlatformFeeAmount.AmountMinorUnits, s.Version, s.UpdatedAt, s.ID)
+			SET status = $1, running_total_minor = $2, final_total_minor = $3, platform_fee_minor = $4, version = $5, updated_at = $6,
+			    assistance_reason = $7, assistance_requested_at = $8, customer_name = $9, customer_phone = $10, guest_count = $11
+			WHERE id = $12;
+		`, string(s.Status), s.RunningTotal.AmountMinorUnits, s.FinalTotal.AmountMinorUnits, s.PlatformFeeAmount.AmountMinorUnits, s.Version, s.UpdatedAt, s.AssistanceReason, s.AssistanceRequestedAt, s.CustomerName, s.CustomerPhone, s.GuestCount, s.ID)
 	}
 	return nil
 }
 
-
 func (r *PostgresRepository) ListActiveSessions(ctx context.Context, restaurantID uuid.UUID) ([]session.DiningSession, error) {
 	if r.pool != nil {
 		rows, err := r.pool.Query(ctx, `
-			SELECT id, restaurant_id, table_id, status, opened_at, running_total_minor, final_total_minor, platform_fee_minor, currency, session_token, device_fingerprint, last_activity_at, expiry_deadline, version, created_at, updated_at
+			SELECT id, restaurant_id, table_id, status, opened_at, running_total_minor, final_total_minor, platform_fee_minor, currency, session_token, device_fingerprint, last_activity_at, expiry_deadline, version, created_at, updated_at,
+			       COALESCE(customer_name, ''), COALESCE(customer_phone, ''), COALESCE(guest_count, 1), COALESCE(assistance_reason, ''), assistance_requested_at
 			FROM dining_sessions
 			WHERE restaurant_id = $1 
 			  AND status IN ('OPEN', 'OPEN_VERIFIED', 'AWAITING_PAYMENT', 'PAID')
@@ -158,7 +166,7 @@ func (r *PostgresRepository) ListActiveSessions(ctx context.Context, restaurantI
 				var s session.DiningSession
 				var statusStr, curr string
 				var runMinor, finMinor, feeMinor int64
-				if err := rows.Scan(&s.ID, &s.RestaurantID, &s.TableID, &statusStr, &s.OpenedAt, &runMinor, &finMinor, &feeMinor, &curr, &s.SessionToken, &s.DeviceFingerprint, &s.LastActivityAt, &s.ExpiryDeadline, &s.Version, &s.CreatedAt, &s.UpdatedAt); err == nil {
+				if err := rows.Scan(&s.ID, &s.RestaurantID, &s.TableID, &statusStr, &s.OpenedAt, &runMinor, &finMinor, &feeMinor, &curr, &s.SessionToken, &s.DeviceFingerprint, &s.LastActivityAt, &s.ExpiryDeadline, &s.Version, &s.CreatedAt, &s.UpdatedAt, &s.CustomerName, &s.CustomerPhone, &s.GuestCount, &s.AssistanceReason, &s.AssistanceRequestedAt); err == nil {
 					s.Status = session.State(statusStr)
 					s.RunningTotal = money.New(runMinor)
 					s.FinalTotal = money.New(finMinor)
@@ -653,6 +661,114 @@ func (r *PostgresRepository) ListPendingOrders(ctx context.Context, restaurantID
 		}
 	}
 	return r.mem.ListPendingOrders(ctx, restaurantID)
+}
+
+func (r *PostgresRepository) ListOrders(ctx context.Context, restaurantID uuid.UUID, limit int) ([]order.Order, error) {
+	if limit <= 0 || limit > 500 {
+		limit = 100
+	}
+	if r.pool != nil {
+		rows, err := r.pool.Query(ctx, `
+			SELECT 
+				o.id,
+				o.session_id,
+				o.restaurant_id,
+				o.sequence_number,
+				o.status,
+				o.placed_at,
+				o.accepted_at,
+				o.accepted_by_staff_id,
+				o.subtotal_minor,
+				o.tax_total_minor,
+				o.total_minor,
+				o.version,
+				COALESCE(NULLIF(o.table_number, ''), NULLIF(t.table_number, ''), 'Table 1') AS table_number,
+				COALESCE(NULLIF(ds.customer_name, ''), 'Guest Diner') AS customer_name,
+				COALESCE(ds.customer_phone, '') AS customer_phone,
+				COALESCE(NULLIF(ds.guest_count, 0), 1) AS guest_count,
+				COALESCE(ds.vehicle_number, '') AS vehicle_number,
+				COALESCE(o.items_summary, '[]'::jsonb) AS items_json
+			FROM orders o
+			LEFT JOIN dining_sessions ds ON ds.id = o.session_id
+			LEFT JOIN tables t ON t.id = ds.table_id
+			WHERE o.restaurant_id = $1 
+			ORDER BY o.placed_at DESC
+			LIMIT $2;
+		`, restaurantID, limit)
+		if err == nil {
+			defer rows.Close()
+			var orders []order.Order
+			for rows.Next() {
+				var o order.Order
+				var subMinor, taxMinor, totMinor int64
+				var statusStr string
+				var itemsJSON []byte
+
+				if err := rows.Scan(
+					&o.ID,
+					&o.SessionID,
+					&o.RestaurantID,
+					&o.SequenceNumber,
+					&statusStr,
+					&o.PlacedAt,
+					&o.AcceptedAt,
+					&o.AcceptedByStaffID,
+					&subMinor,
+					&taxMinor,
+					&totMinor,
+					&o.Version,
+					&o.TableNumber,
+					&o.CustomerName,
+					&o.CustomerPhone,
+					&o.GuestCount,
+					&o.VehicleNumber,
+					&itemsJSON,
+				); err == nil {
+					if o.VehicleNumber != "" {
+						o.TableNumber = "Car " + strings.ToUpper(o.VehicleNumber)
+					}
+					o.Status = order.State(statusStr)
+					o.Subtotal = money.New(subMinor)
+					o.TaxTotal = money.New(taxMinor)
+					o.Total = money.New(totMinor)
+
+					type rawItem struct {
+						ID                  uuid.UUID `json:"id"`
+						OrderID             uuid.UUID `json:"order_id"`
+						MenuItemID          uuid.UUID `json:"menu_item_id"`
+						ItemNameSnapshot    string    `json:"item_name_snapshot"`
+						Quantity            int       `json:"quantity"`
+						UnitPriceMinor      int64     `json:"unit_price_minor"`
+						LineTotalMinor      int64     `json:"line_total_minor"`
+						SpecialInstructions string    `json:"special_instructions"`
+					}
+					var rawItems []rawItem
+					if err := json.Unmarshal(itemsJSON, &rawItems); err == nil && len(rawItems) > 0 {
+						for _, it := range rawItems {
+							o.Items = append(o.Items, order.OrderItem{
+								ID:                  it.ID,
+								OrderID:             it.OrderID,
+								MenuItemID:          it.MenuItemID,
+								ItemNameSnapshot:    it.ItemNameSnapshot,
+								Quantity:            it.Quantity,
+								UnitPriceSnapshot:   money.New(it.UnitPriceMinor),
+								LineTotal:           money.New(it.LineTotalMinor),
+								SpecialInstructions: it.SpecialInstructions,
+							})
+						}
+					} else {
+						var directItems []order.OrderItem
+						if err := json.Unmarshal(itemsJSON, &directItems); err == nil && len(directItems) > 0 {
+							o.Items = directItems
+						}
+					}
+					orders = append(orders, o)
+				}
+			}
+			return orders, nil
+		}
+	}
+	return r.mem.ListOrders(ctx, restaurantID, limit)
 }
 
 // ---------------- Payment ----------------

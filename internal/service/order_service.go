@@ -445,3 +445,7 @@ func (s *OrderService) ListPendingOrders(ctx context.Context, restaurantID uuid.
 	return s.repo.ListPendingOrders(ctx, restaurantID)
 }
 
+func (s *OrderService) ListOrders(ctx context.Context, restaurantID uuid.UUID, limit int) ([]order.Order, error) {
+	return s.repo.ListOrders(ctx, restaurantID, limit)
+}
+

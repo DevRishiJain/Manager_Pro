@@ -66,6 +66,7 @@ type Repository interface {
 	UpdateOrder(ctx context.Context, o *order.Order) error
 	ListKitchenQueue(ctx context.Context, restaurantID uuid.UUID, statuses []order.State) ([]order.Order, error)
 	ListPendingOrders(ctx context.Context, restaurantID uuid.UUID) ([]order.Order, error)
+	ListOrders(ctx context.Context, restaurantID uuid.UUID, limit int) ([]order.Order, error)
 
 	// Payment
 	CreatePayment(ctx context.Context, p *payment.Payment) error
