@@ -3,11 +3,14 @@ package postgres
 import (
 	"context"
 	"encoding/json"
+	"fmt"
 	"strings"
 	"time"
 
 	"github.com/devrishijain/table-manager/internal/domain/audit"
 	"github.com/devrishijain/table-manager/internal/domain/exitpass"
+	"github.com/devrishijain/table-manager/internal/domain/expense"
+	"github.com/devrishijain/table-manager/internal/domain/inventory"
 	"github.com/devrishijain/table-manager/internal/domain/ledger"
 	"github.com/devrishijain/table-manager/internal/domain/money"
 	"github.com/devrishijain/table-manager/internal/domain/order"
@@ -663,7 +666,7 @@ func (r *PostgresRepository) ListPendingOrders(ctx context.Context, restaurantID
 	return r.mem.ListPendingOrders(ctx, restaurantID)
 }
 
-func (r *PostgresRepository) ListOrders(ctx context.Context, restaurantID uuid.UUID, limit int) ([]order.Order, error) {
+func (r *PostgresRepository) ListOrders(ctx context.Context, restaurantID uuid.UUID, limit int, startDate, endDate *time.Time) ([]order.Order, error) {
 	if limit <= 0 || limit > 500 {
 		limit = 100
 	}
@@ -692,12 +695,14 @@ func (r *PostgresRepository) ListOrders(ctx context.Context, restaurantID uuid.U
 			LEFT JOIN dining_sessions ds ON ds.id = o.session_id
 			LEFT JOIN tables t ON t.id = ds.table_id
 			WHERE o.restaurant_id = $1 
+			  AND ($3::timestamptz IS NULL OR o.placed_at >= $3)
+			  AND ($4::timestamptz IS NULL OR o.placed_at <= $4)
 			ORDER BY o.placed_at DESC
 			LIMIT $2;
-		`, restaurantID, limit)
+		`, restaurantID, limit, startDate, endDate)
 		if err == nil {
 			defer rows.Close()
-			var orders []order.Order
+			orders := make([]order.Order, 0)
 			for rows.Next() {
 				var o order.Order
 				var subMinor, taxMinor, totMinor int64
@@ -768,7 +773,7 @@ func (r *PostgresRepository) ListOrders(ctx context.Context, restaurantID uuid.U
 			return orders, nil
 		}
 	}
-	return r.mem.ListOrders(ctx, restaurantID, limit)
+	return r.mem.ListOrders(ctx, restaurantID, limit, startDate, endDate)
 }
 
 // ---------------- Payment ----------------
@@ -946,10 +951,55 @@ func (r *PostgresRepository) CreatePlatformFeeEntry(ctx context.Context, entry *
 }
 
 func (r *PostgresRepository) GetPlatformFeeBySessionID(ctx context.Context, sessionID uuid.UUID) (*ledger.PlatformFeeLedgerEntry, error) {
+	if r.pool != nil {
+		var entry ledger.PlatformFeeLedgerEntry
+		var gmvMinor, feeMinor int64
+		var statusStr string
+		err := r.pool.QueryRow(ctx, `
+			SELECT id, restaurant_id, session_id, gmv_minor, fee_rate_bps, fee_amount_minor, settlement_status, created_at
+			FROM platform_fee_ledger
+			WHERE session_id = $1;
+		`, sessionID).Scan(&entry.ID, &entry.RestaurantID, &entry.SessionID, &gmvMinor, &entry.FeeRateApplied, &feeMinor, &statusStr, &entry.CreatedAt)
+		if err == nil {
+			entry.GMVAmount = money.New(gmvMinor)
+			entry.FeeAmount = money.New(feeMinor)
+			entry.SettlementStatus = ledger.SettlementStatus(statusStr)
+			entry.BillingPeriod = entry.CreatedAt.Format("2006-01")
+			return &entry, nil
+		}
+	}
 	return r.mem.GetPlatformFeeBySessionID(ctx, sessionID)
 }
 
 func (r *PostgresRepository) ListPlatformFees(ctx context.Context, restaurantID uuid.UUID, period string) ([]ledger.PlatformFeeLedgerEntry, error) {
+	if r.pool != nil {
+		query := `
+			SELECT id, restaurant_id, session_id, gmv_minor, fee_rate_bps, fee_amount_minor, settlement_status, created_at
+			FROM platform_fee_ledger
+			WHERE restaurant_id = $1
+			ORDER BY created_at DESC;
+		`
+		rows, err := r.pool.Query(ctx, query, restaurantID)
+		if err == nil {
+			defer rows.Close()
+			fees := make([]ledger.PlatformFeeLedgerEntry, 0)
+			for rows.Next() {
+				var entry ledger.PlatformFeeLedgerEntry
+				var gmvMinor, feeMinor int64
+				var statusStr string
+				if err := rows.Scan(&entry.ID, &entry.RestaurantID, &entry.SessionID, &gmvMinor, &entry.FeeRateApplied, &feeMinor, &statusStr, &entry.CreatedAt); err == nil {
+					entry.GMVAmount = money.New(gmvMinor)
+					entry.FeeAmount = money.New(feeMinor)
+					entry.SettlementStatus = ledger.SettlementStatus(statusStr)
+					entry.BillingPeriod = entry.CreatedAt.Format("2006-01")
+					if period == "" || entry.BillingPeriod == period {
+						fees = append(fees, entry)
+					}
+				}
+			}
+			return fees, nil
+		}
+	}
 	return r.mem.ListPlatformFees(ctx, restaurantID, period)
 }
 
@@ -1420,6 +1470,534 @@ func (r *PostgresRepository) RecordWebhookEvent(ctx context.Context, gateway, ev
 		}
 	}
 	return r.mem.RecordWebhookEvent(ctx, gateway, eventID)
+}
+
+// ---------------- Expenses ----------------
+
+func (r *PostgresRepository) CreateExpense(ctx context.Context, e *expense.Expense) error {
+	_ = r.mem.CreateExpense(ctx, e)
+	if r.pool != nil {
+		if e.ID == uuid.Nil {
+			e.ID = uuid.New()
+		}
+		now := time.Now().UTC()
+		if e.CreatedAt.IsZero() {
+			e.CreatedAt = now
+		}
+		if e.UpdatedAt.IsZero() {
+			e.UpdatedAt = now
+		}
+		curr := e.Amount.Currency
+		if curr == "" {
+			curr = "INR"
+		}
+
+		tx, err := r.pool.Begin(ctx)
+		if err != nil {
+			return err
+		}
+		defer tx.Rollback(ctx)
+
+		_, err = tx.Exec(ctx, `
+			INSERT INTO restaurant_expenses (
+				id, restaurant_id, type, category, title, amount_minor, currency,
+				paid_via, vendor_name, expense_date, notes, is_stock_purchase, inventory_log_id, created_by_staff_id, created_at, updated_at
+			) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16)
+		`, e.ID, e.RestaurantID, string(e.Type), string(e.Category), e.Title, e.Amount.AmountMinorUnits, curr,
+			e.PaidVia, e.VendorName, e.ExpenseDate, e.Notes, e.IsStockPurchase, e.InventoryLogID, e.CreatedByStaffID, e.CreatedAt, e.UpdatedAt)
+		if err != nil {
+			return err
+		}
+
+		for i := range e.LineItems {
+			li := &e.LineItems[i]
+			if li.ID == uuid.Nil {
+				li.ID = uuid.New()
+			}
+			li.ExpenseID = e.ID
+			if li.CreatedAt.IsZero() {
+				li.CreatedAt = now
+			}
+			_, err = tx.Exec(ctx, `
+				INSERT INTO expense_line_items (
+					id, expense_id, inventory_item_id, item_name, quantity, unit, unit_price_minor, total_price_minor, created_at
+				) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9)
+			`, li.ID, li.ExpenseID, li.InventoryItemID, li.ItemName, li.Quantity, li.Unit, li.UnitPrice.AmountMinorUnits, li.TotalPrice.AmountMinorUnits, li.CreatedAt)
+			if err != nil {
+				return err
+			}
+		}
+
+		return tx.Commit(ctx)
+	}
+	return nil
+}
+
+func (r *PostgresRepository) ListExpenses(ctx context.Context, restaurantID uuid.UUID, expenseType *expense.ExpenseType, category *expense.ExpenseCategory, startDate, endDate *time.Time) ([]expense.Expense, error) {
+	if r.pool == nil {
+		return r.mem.ListExpenses(ctx, restaurantID, expenseType, category, startDate, endDate)
+	}
+
+	query := `
+		SELECT id, restaurant_id, type, category, title, amount_minor, currency,
+		       paid_via, vendor_name, expense_date, notes, is_stock_purchase, inventory_log_id, created_by_staff_id, created_at, updated_at
+		FROM restaurant_expenses
+		WHERE restaurant_id = $1
+	`
+	args := []any{restaurantID}
+	argIdx := 2
+
+	if expenseType != nil && *expenseType != "" {
+		query += fmt.Sprintf(" AND type = $%d", argIdx)
+		args = append(args, string(*expenseType))
+		argIdx++
+	}
+	if category != nil && *category != "" {
+		query += fmt.Sprintf(" AND category = $%d", argIdx)
+		args = append(args, string(*category))
+		argIdx++
+	}
+	if startDate != nil {
+		query += fmt.Sprintf(" AND expense_date >= $%d", argIdx)
+		args = append(args, *startDate)
+		argIdx++
+	}
+	if endDate != nil {
+		query += fmt.Sprintf(" AND expense_date <= $%d", argIdx)
+		args = append(args, *endDate)
+		argIdx++
+	}
+
+	query += " ORDER BY expense_date DESC, created_at DESC"
+
+	rows, err := r.pool.Query(ctx, query, args...)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+
+	var expenses []expense.Expense
+	for rows.Next() {
+		var e expense.Expense
+		var typ, cat, curr string
+		var amountMinor int64
+		err := rows.Scan(
+			&e.ID, &e.RestaurantID, &typ, &cat, &e.Title, &amountMinor, &curr,
+			&e.PaidVia, &e.VendorName, &e.ExpenseDate, &e.Notes, &e.IsStockPurchase, &e.InventoryLogID, &e.CreatedByStaffID, &e.CreatedAt, &e.UpdatedAt,
+		)
+		if err != nil {
+			return nil, err
+		}
+		e.Type = expense.ExpenseType(typ)
+		e.Category = expense.ExpenseCategory(cat)
+		e.Amount = money.NewWithCurrency(amountMinor, curr)
+		expenses = append(expenses, e)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+	return expenses, nil
+}
+
+func (r *PostgresRepository) ListExpenseLineItems(ctx context.Context, expenseID uuid.UUID) ([]expense.ExpenseLineItem, error) {
+	if r.pool == nil {
+		return r.mem.ListExpenseLineItems(ctx, expenseID)
+	}
+	rows, err := r.pool.Query(ctx, `
+		SELECT id, expense_id, inventory_item_id, item_name, quantity, unit, unit_price_minor, total_price_minor, created_at
+		FROM expense_line_items
+		WHERE expense_id = $1
+		ORDER BY created_at ASC
+	`, expenseID)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+
+	var items []expense.ExpenseLineItem
+	for rows.Next() {
+		var li expense.ExpenseLineItem
+		var up, tp int64
+		if err := rows.Scan(&li.ID, &li.ExpenseID, &li.InventoryItemID, &li.ItemName, &li.Quantity, &li.Unit, &up, &tp, &li.CreatedAt); err != nil {
+			return nil, err
+		}
+		li.UnitPrice = money.New(up)
+		li.TotalPrice = money.New(tp)
+		items = append(items, li)
+	}
+	return items, rows.Err()
+}
+
+func (r *PostgresRepository) DeleteExpense(ctx context.Context, restaurantID, expenseID uuid.UUID) error {
+	_ = r.mem.DeleteExpense(ctx, restaurantID, expenseID)
+	if r.pool != nil {
+		tag, err := r.pool.Exec(ctx, `DELETE FROM restaurant_expenses WHERE id = $1 AND restaurant_id = $2`, expenseID, restaurantID)
+		if err != nil {
+			return err
+		}
+		if tag.RowsAffected() == 0 {
+			return storage.ErrNotFound
+		}
+	}
+	return nil
+}
+
+// ---------------- Inventory ----------------
+
+func (r *PostgresRepository) CreateInventoryItem(ctx context.Context, item *inventory.InventoryItem) error {
+	_ = r.mem.CreateInventoryItem(ctx, item)
+	if r.pool != nil {
+		if item.ID == uuid.Nil {
+			item.ID = uuid.New()
+		}
+		now := time.Now().UTC()
+		if item.CreatedAt.IsZero() {
+			item.CreatedAt = now
+		}
+		if item.UpdatedAt.IsZero() {
+			item.UpdatedAt = now
+		}
+		_, err := r.pool.Exec(ctx, `
+			INSERT INTO inventory_items (
+				id, restaurant_id, name, category, unit, current_stock, min_threshold, unit_cost_minor, created_at, updated_at
+			) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10)
+		`, item.ID, item.RestaurantID, item.Name, item.Category, item.Unit, item.CurrentStock, item.MinThreshold, item.UnitCost.AmountMinorUnits, item.CreatedAt, item.UpdatedAt)
+		if err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+func (r *PostgresRepository) GetInventoryItemByID(ctx context.Context, restaurantID, id uuid.UUID) (*inventory.InventoryItem, error) {
+	if r.pool == nil {
+		return r.mem.GetInventoryItemByID(ctx, restaurantID, id)
+	}
+
+	var item inventory.InventoryItem
+	var unitCostMinor int64
+	err := r.pool.QueryRow(ctx, `
+		SELECT id, restaurant_id, name, category, unit, current_stock, min_threshold, unit_cost_minor, created_at, updated_at
+		FROM inventory_items
+		WHERE id = $1 AND restaurant_id = $2
+	`, id, restaurantID).Scan(
+		&item.ID, &item.RestaurantID, &item.Name, &item.Category, &item.Unit, &item.CurrentStock, &item.MinThreshold, &unitCostMinor, &item.CreatedAt, &item.UpdatedAt,
+	)
+	if err != nil {
+		return nil, storage.ErrNotFound
+	}
+	item.UnitCost = money.New(unitCostMinor)
+	return &item, nil
+}
+
+func (r *PostgresRepository) ListInventoryItems(ctx context.Context, restaurantID uuid.UUID) ([]inventory.InventoryItem, error) {
+	if r.pool == nil {
+		return r.mem.ListInventoryItems(ctx, restaurantID)
+	}
+
+	rows, err := r.pool.Query(ctx, `
+		SELECT id, restaurant_id, name, category, unit, current_stock, min_threshold, unit_cost_minor, created_at, updated_at
+		FROM inventory_items
+		WHERE restaurant_id = $1
+		ORDER BY name ASC
+	`, restaurantID)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+
+	var items []inventory.InventoryItem
+	for rows.Next() {
+		var item inventory.InventoryItem
+		var unitCostMinor int64
+		err := rows.Scan(
+			&item.ID, &item.RestaurantID, &item.Name, &item.Category, &item.Unit, &item.CurrentStock, &item.MinThreshold, &unitCostMinor, &item.CreatedAt, &item.UpdatedAt,
+		)
+		if err != nil {
+			return nil, err
+		}
+		item.UnitCost = money.New(unitCostMinor)
+		items = append(items, item)
+	}
+	return items, rows.Err()
+}
+
+func (r *PostgresRepository) UpdateInventoryItem(ctx context.Context, item *inventory.InventoryItem) error {
+	_ = r.mem.UpdateInventoryItem(ctx, item)
+	if r.pool != nil {
+		item.UpdatedAt = time.Now().UTC()
+		tag, err := r.pool.Exec(ctx, `
+			UPDATE inventory_items
+			SET name = $1, category = $2, unit = $3, current_stock = $4, min_threshold = $5, unit_cost_minor = $6, updated_at = $7
+			WHERE id = $8 AND restaurant_id = $9
+		`, item.Name, item.Category, item.Unit, item.CurrentStock, item.MinThreshold, item.UnitCost.AmountMinorUnits, item.UpdatedAt, item.ID, item.RestaurantID)
+		if err != nil {
+			return err
+		}
+		if tag.RowsAffected() == 0 {
+			return storage.ErrNotFound
+		}
+	}
+	return nil
+}
+
+func (r *PostgresRepository) DeleteInventoryItem(ctx context.Context, restaurantID, id uuid.UUID) error {
+	_ = r.mem.DeleteInventoryItem(ctx, restaurantID, id)
+	if r.pool != nil {
+		tag, err := r.pool.Exec(ctx, `DELETE FROM inventory_items WHERE id = $1 AND restaurant_id = $2`, id, restaurantID)
+		if err != nil {
+			return err
+		}
+		if tag.RowsAffected() == 0 {
+			return storage.ErrNotFound
+		}
+	}
+	return nil
+}
+
+func (r *PostgresRepository) CreateInventoryLog(ctx context.Context, log *inventory.InventoryLog) error {
+	_ = r.mem.CreateInventoryLog(ctx, log)
+	if r.pool != nil {
+		if log.ID == uuid.Nil {
+			log.ID = uuid.New()
+		}
+		if log.LoggedAt.IsZero() {
+			log.LoggedAt = time.Now().UTC()
+		}
+
+		tx, err := r.pool.Begin(ctx)
+		if err != nil {
+			return err
+		}
+		defer tx.Rollback(ctx)
+
+		_, err = tx.Exec(ctx, `
+			INSERT INTO inventory_logs (
+				id, restaurant_id, inventory_item_id, change_type, quantity, unit_cost_minor, total_cost_minor, reference, expense_id, order_id, logged_at
+			) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11)
+		`, log.ID, log.RestaurantID, log.InventoryItemID, string(log.ChangeType), log.Quantity, log.UnitCost.AmountMinorUnits, log.TotalCost.AmountMinorUnits, log.Reference, log.ExpenseID, log.OrderID, log.LoggedAt)
+		if err != nil {
+			return err
+		}
+
+		switch log.ChangeType {
+		case inventory.ChangeStockIn:
+			if log.UnitCost.AmountMinorUnits > 0 {
+				_, err = tx.Exec(ctx, `UPDATE inventory_items SET current_stock = current_stock + $1, unit_cost_minor = $2, updated_at = NOW() WHERE id = $3 AND restaurant_id = $4`, log.Quantity, log.UnitCost.AmountMinorUnits, log.InventoryItemID, log.RestaurantID)
+			} else {
+				_, err = tx.Exec(ctx, `UPDATE inventory_items SET current_stock = current_stock + $1, updated_at = NOW() WHERE id = $2 AND restaurant_id = $3`, log.Quantity, log.InventoryItemID, log.RestaurantID)
+			}
+		case inventory.ChangeWastage, inventory.ChangeOrderConsumption:
+			_, err = tx.Exec(ctx, `UPDATE inventory_items SET current_stock = current_stock - $1, updated_at = NOW() WHERE id = $2 AND restaurant_id = $3`, log.Quantity, log.InventoryItemID, log.RestaurantID)
+		case inventory.ChangeAdjustment:
+			_, err = tx.Exec(ctx, `UPDATE inventory_items SET current_stock = $1, updated_at = NOW() WHERE id = $2 AND restaurant_id = $3`, log.Quantity, log.InventoryItemID, log.RestaurantID)
+		}
+		if err != nil {
+			return err
+		}
+
+		return tx.Commit(ctx)
+	}
+	return nil
+}
+
+func (r *PostgresRepository) ListInventoryLogs(ctx context.Context, restaurantID uuid.UUID, itemID *uuid.UUID, limit int) ([]inventory.InventoryLog, error) {
+	if r.pool == nil {
+		return r.mem.ListInventoryLogs(ctx, restaurantID, itemID, limit)
+	}
+
+	query := `
+		SELECT l.id, l.restaurant_id, l.inventory_item_id, COALESCE(i.name, ''), COALESCE(i.unit, ''),
+		       l.change_type, l.quantity, l.unit_cost_minor, l.total_cost_minor, l.reference, l.expense_id, l.order_id, l.logged_at
+		FROM inventory_logs l
+		LEFT JOIN inventory_items i ON l.inventory_item_id = i.id
+		WHERE l.restaurant_id = $1
+	`
+	args := []any{restaurantID}
+	if itemID != nil {
+		query += " AND l.inventory_item_id = $2"
+		args = append(args, *itemID)
+	}
+	query += " ORDER BY l.logged_at DESC"
+	if limit > 0 {
+		query += fmt.Sprintf(" LIMIT %d", limit)
+	}
+
+	rows, err := r.pool.Query(ctx, query, args...)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+
+	var logs []inventory.InventoryLog
+	for rows.Next() {
+		var l inventory.InventoryLog
+		var changeType string
+		var unitCostMinor, totalCostMinor int64
+		err := rows.Scan(
+			&l.ID, &l.RestaurantID, &l.InventoryItemID, &l.ItemName, &l.Unit,
+			&changeType, &l.Quantity, &unitCostMinor, &totalCostMinor, &l.Reference, &l.ExpenseID, &l.OrderID, &l.LoggedAt,
+		)
+		if err != nil {
+			return nil, err
+		}
+		l.ChangeType = inventory.ChangeType(changeType)
+		l.UnitCost = money.New(unitCostMinor)
+		l.TotalCost = money.New(totalCostMinor)
+		logs = append(logs, l)
+	}
+	return logs, rows.Err()
+}
+
+// ---------------- Recipes & Costing ----------------
+
+func (r *PostgresRepository) SaveRecipeIngredients(ctx context.Context, restaurantID, menuItemID uuid.UUID, ingredients []inventory.RecipeIngredient) error {
+	_ = r.mem.SaveRecipeIngredients(ctx, restaurantID, menuItemID, ingredients)
+	if r.pool != nil {
+		tx, err := r.pool.Begin(ctx)
+		if err != nil {
+			return err
+		}
+		defer tx.Rollback(ctx)
+
+		_, err = tx.Exec(ctx, `DELETE FROM recipe_ingredients WHERE restaurant_id = $1 AND menu_item_id = $2`, restaurantID, menuItemID)
+		if err != nil {
+			return err
+		}
+
+		now := time.Now().UTC()
+		for _, ing := range ingredients {
+			ingID := ing.ID
+			if ingID == uuid.Nil {
+				ingID = uuid.New()
+			}
+			_, err = tx.Exec(ctx, `
+				INSERT INTO recipe_ingredients (
+					id, restaurant_id, menu_item_id, inventory_item_id, quantity_required, created_at, updated_at
+				) VALUES ($1, $2, $3, $4, $5, $6, $7)
+			`, ingID, restaurantID, menuItemID, ing.InventoryItemID, ing.QuantityRequired, now, now)
+			if err != nil {
+				return err
+			}
+		}
+
+		return tx.Commit(ctx)
+	}
+	return nil
+}
+
+func (r *PostgresRepository) GetRecipeIngredientsByMenuItemID(ctx context.Context, restaurantID, menuItemID uuid.UUID) ([]inventory.RecipeIngredient, error) {
+	if r.pool == nil {
+		return r.mem.GetRecipeIngredientsByMenuItemID(ctx, restaurantID, menuItemID)
+	}
+
+	rows, err := r.pool.Query(ctx, `
+		SELECT r.id, r.restaurant_id, r.menu_item_id, r.inventory_item_id,
+		       COALESCE(i.name, ''), COALESCE(i.unit, ''), r.quantity_required,
+		       COALESCE(i.unit_cost_minor, 0), r.created_at, r.updated_at
+		FROM recipe_ingredients r
+		JOIN inventory_items i ON r.inventory_item_id = i.id
+		WHERE r.restaurant_id = $1 AND r.menu_item_id = $2
+		ORDER BY i.name ASC
+	`, restaurantID, menuItemID)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+
+	var result []inventory.RecipeIngredient
+	for rows.Next() {
+		var ing inventory.RecipeIngredient
+		var unitCostMinor int64
+		err := rows.Scan(
+			&ing.ID, &ing.RestaurantID, &ing.MenuItemID, &ing.InventoryItemID,
+			&ing.ItemName, &ing.Unit, &ing.QuantityRequired,
+			&unitCostMinor, &ing.CreatedAt, &ing.UpdatedAt,
+		)
+		if err != nil {
+			return nil, err
+		}
+		ing.UnitCost = money.New(unitCostMinor)
+		costContrib := int64(float64(unitCostMinor) * ing.QuantityRequired)
+		ing.CostContribution = money.New(costContrib)
+		result = append(result, ing)
+	}
+	return result, rows.Err()
+}
+
+func (r *PostgresRepository) ListDishMargins(ctx context.Context, restaurantID uuid.UUID) ([]inventory.DishMargin, error) {
+	if r.pool == nil {
+		return r.mem.ListDishMargins(ctx, restaurantID)
+	}
+
+	rows, err := r.pool.Query(ctx, `
+		SELECT m.id, m.name, COALESCE(c.name, ''), m.price_minor, m.currency,
+		       COALESCE(SUM(ri.quantity_required * ii.unit_cost_minor), 0)::BIGINT AS total_recipe_cost
+		FROM menu_items m
+		LEFT JOIN menu_categories c ON m.category_id = c.id
+		LEFT JOIN recipe_ingredients ri ON m.id = ri.menu_item_id
+		LEFT JOIN inventory_items ii ON ri.inventory_item_id = ii.id
+		WHERE m.restaurant_id = $1
+		GROUP BY m.id, m.name, c.name, m.price_minor, m.currency
+		ORDER BY m.name ASC
+	`, restaurantID)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+
+	var result []inventory.DishMargin
+	for rows.Next() {
+		var dish inventory.DishMargin
+		var sellingMinor, costMinor int64
+		var curr string
+		err := rows.Scan(
+			&dish.MenuItemID, &dish.MenuItemName, &dish.CategoryName,
+			&sellingMinor, &curr, &costMinor,
+		)
+		if err != nil {
+			return nil, err
+		}
+		if curr == "" {
+			curr = "INR"
+		}
+		dish.SellingPrice = money.NewWithCurrency(sellingMinor, curr)
+		dish.CostPrice = money.NewWithCurrency(costMinor, curr)
+		grossProfitMinor := sellingMinor - costMinor
+		dish.GrossProfit = money.NewWithCurrency(grossProfitMinor, curr)
+		if sellingMinor > 0 {
+			dish.MarginPct = float64(grossProfitMinor) / float64(sellingMinor) * 100.0
+		}
+		result = append(result, dish)
+	}
+	return result, rows.Err()
+}
+
+func (r *PostgresRepository) ListRecipeIngredientsForOrder(ctx context.Context, orderID uuid.UUID) ([]inventory.OrderIngredientRequirement, error) {
+	if r.pool == nil {
+		return r.mem.ListRecipeIngredientsForOrder(ctx, orderID)
+	}
+	rows, err := r.pool.Query(ctx, `
+		SELECT ri.inventory_item_id, SUM(ri.quantity_required * oi.quantity)::FLOAT8 AS total_qty
+		FROM order_items oi
+		JOIN recipe_ingredients ri ON oi.menu_item_id = ri.menu_item_id
+		WHERE oi.order_id = $1
+		GROUP BY ri.inventory_item_id
+	`, orderID)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+
+	var reqs []inventory.OrderIngredientRequirement
+	for rows.Next() {
+		var req inventory.OrderIngredientRequirement
+		if err := rows.Scan(&req.InventoryItemID, &req.Quantity); err != nil {
+			return nil, err
+		}
+		reqs = append(reqs, req)
+	}
+	return reqs, rows.Err()
 }
 
 // Ensure interface compliance

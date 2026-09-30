@@ -10,6 +10,7 @@ import (
 
 	"github.com/devrishijain/table-manager/internal/domain/audit"
 	"github.com/devrishijain/table-manager/internal/domain/exitpass"
+	"github.com/devrishijain/table-manager/internal/domain/inventory"
 	"github.com/devrishijain/table-manager/internal/domain/money"
 	"github.com/devrishijain/table-manager/internal/domain/order"
 	"github.com/devrishijain/table-manager/internal/domain/risk"
@@ -338,6 +339,8 @@ func (s *OrderService) AcceptOrder(ctx context.Context, orderID, staffID uuid.UU
 		CreatedAt:    now,
 	})
 
+	s.depleteOrderIngredients(ctx, ord)
+
 	return ord, nil
 }
 
@@ -357,6 +360,10 @@ func (s *OrderService) UpdateOrderStatus(ctx context.Context, orderID uuid.UUID,
 	ord.UpdatedAt = now
 	if err := s.repo.UpdateOrder(ctx, ord); err != nil {
 		return nil, err
+	}
+
+	if targetState == order.StateAccepted || targetState == order.StatePreparing {
+		s.depleteOrderIngredients(ctx, ord)
 	}
 
 	orderBytes, _ := json.Marshal(ord)
@@ -414,6 +421,7 @@ func (s *OrderService) CancelOrder(ctx context.Context, orderID, actorID uuid.UU
 			sess.RunningTotal, _ = sess.RunningTotal.Sub(ord.Total)
 			_ = s.repo.UpdateSession(ctx, sess)
 		}
+		s.restoreOrderIngredients(ctx, ord)
 	}
 
 	orderBytes, _ := json.Marshal(ord)
@@ -432,6 +440,86 @@ func (s *OrderService) CancelOrder(ctx context.Context, orderID, actorID uuid.UU
 	return ord, nil
 }
 
+func (s *OrderService) depleteOrderIngredients(ctx context.Context, ord *order.Order) {
+	if ord == nil {
+		return
+	}
+	existingLogs, err := s.repo.ListInventoryLogs(ctx, ord.RestaurantID, nil, 100)
+	if err == nil {
+		for _, l := range existingLogs {
+			if l.OrderID != nil && *l.OrderID == ord.ID && l.ChangeType == inventory.ChangeOrderConsumption {
+				return // already depleted
+			}
+		}
+	}
+
+	reqs, err := s.repo.ListRecipeIngredientsForOrder(ctx, ord.ID)
+	if err != nil || len(reqs) == 0 {
+		return
+	}
+
+	now := time.Now().UTC()
+	for _, req := range reqs {
+		if req.Quantity <= 0 {
+			continue
+		}
+		invLog := &inventory.InventoryLog{
+			ID:              uuid.New(),
+			RestaurantID:    ord.RestaurantID,
+			InventoryItemID: req.InventoryItemID,
+			ChangeType:      inventory.ChangeOrderConsumption,
+			Quantity:        req.Quantity,
+			Reference:       fmt.Sprintf("Order #%d Table %s", ord.SequenceNumber, ord.TableNumber),
+			OrderID:         &ord.ID,
+			LoggedAt:        now,
+		}
+		_ = s.repo.CreateInventoryLog(ctx, invLog)
+	}
+}
+
+func (s *OrderService) restoreOrderIngredients(ctx context.Context, ord *order.Order) {
+	if ord == nil {
+		return
+	}
+	existingLogs, err := s.repo.ListInventoryLogs(ctx, ord.RestaurantID, nil, 100)
+	if err != nil {
+		return
+	}
+	wasDepleted := false
+	for _, l := range existingLogs {
+		if l.OrderID != nil && *l.OrderID == ord.ID && l.ChangeType == inventory.ChangeOrderConsumption {
+			wasDepleted = true
+			break
+		}
+	}
+	if !wasDepleted {
+		return
+	}
+
+	reqs, err := s.repo.ListRecipeIngredientsForOrder(ctx, ord.ID)
+	if err != nil || len(reqs) == 0 {
+		return
+	}
+
+	now := time.Now().UTC()
+	for _, req := range reqs {
+		if req.Quantity <= 0 {
+			continue
+		}
+		invLog := &inventory.InventoryLog{
+			ID:              uuid.New(),
+			RestaurantID:    ord.RestaurantID,
+			InventoryItemID: req.InventoryItemID,
+			ChangeType:      inventory.ChangeStockIn,
+			Quantity:        req.Quantity,
+			Reference:       fmt.Sprintf("Restored from cancelled Order #%d", ord.SequenceNumber),
+			OrderID:         &ord.ID,
+			LoggedAt:        now,
+		}
+		_ = s.repo.CreateInventoryLog(ctx, invLog)
+	}
+}
+
 func (s *OrderService) GetOrdersBySessionID(ctx context.Context, sessionID uuid.UUID) ([]order.Order, error) {
 	return s.repo.GetOrdersBySessionID(ctx, sessionID)
 }
@@ -445,7 +533,7 @@ func (s *OrderService) ListPendingOrders(ctx context.Context, restaurantID uuid.
 	return s.repo.ListPendingOrders(ctx, restaurantID)
 }
 
-func (s *OrderService) ListOrders(ctx context.Context, restaurantID uuid.UUID, limit int) ([]order.Order, error) {
-	return s.repo.ListOrders(ctx, restaurantID, limit)
+func (s *OrderService) ListOrders(ctx context.Context, restaurantID uuid.UUID, limit int, startDate, endDate *time.Time) ([]order.Order, error) {
+	return s.repo.ListOrders(ctx, restaurantID, limit, startDate, endDate)
 }
 

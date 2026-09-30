@@ -36,6 +36,8 @@ type APIHandler struct {
 	onboardingService *service.OnboardingService
 	aiCatalogService  *service.AICatalogService
 	staffService      *service.StaffService
+	expenseService    *service.ExpenseService
+	inventoryService  *service.InventoryService
 	objectStore       objstore.ObjectStore
 	repo              storage.Repository
 	webhookSecret     string
@@ -59,6 +61,28 @@ func (h *APIHandler) SetAICatalogService(aiSvc *service.AICatalogService) {
 
 func (h *APIHandler) SetStaffService(staffSvc *service.StaffService) {
 	h.staffService = staffSvc
+}
+
+func (h *APIHandler) SetExpenseService(expSvc *service.ExpenseService) {
+	h.expenseService = expSvc
+}
+
+func (h *APIHandler) getExpenseService() *service.ExpenseService {
+	if h.expenseService == nil {
+		h.expenseService = service.NewExpenseService(h.repo)
+	}
+	return h.expenseService
+}
+
+func (h *APIHandler) SetInventoryService(invSvc *service.InventoryService) {
+	h.inventoryService = invSvc
+}
+
+func (h *APIHandler) getInventoryService() *service.InventoryService {
+	if h.inventoryService == nil {
+		h.inventoryService = service.NewInventoryService(h.repo)
+	}
+	return h.inventoryService
 }
 
 func (h *APIHandler) getStaffService() *service.StaffService {
@@ -808,6 +832,42 @@ func (h *APIHandler) RazorpayWebhook(w http.ResponseWriter, r *http.Request) {
 
 // ---------------- Tenant Admin & Analytics Handlers ----------------
 
+func (h *APIHandler) GetExecutiveDashboardAnalytics(w http.ResponseWriter, r *http.Request) {
+	var restaurantID uuid.UUID
+	if claims, ok := middleware.GetStaffClaimsFromContext(r.Context()); ok && claims.RestaurantID != uuid.Nil {
+		restaurantID = claims.RestaurantID
+	}
+	if restaurantID == uuid.Nil {
+		if restParam := r.URL.Query().Get("restaurant_id"); restParam != "" {
+			restaurantID, _ = uuid.Parse(restParam)
+		}
+	}
+	if restaurantID == uuid.Nil {
+		errorResponse(w, http.StatusBadRequest, "restaurant_id is required")
+		return
+	}
+
+	var startDate, endDate *time.Time
+	if sStr := r.URL.Query().Get("start_date"); sStr != "" {
+		if t, err := parseDateFilter(sStr, false); err == nil {
+			startDate = t
+		}
+	}
+	if eStr := r.URL.Query().Get("end_date"); eStr != "" {
+		if t, err := parseDateFilter(eStr, true); err == nil {
+			endDate = t
+		}
+	}
+
+	analytics, err := h.analyticsService.GetExecutiveAnalytics(r.Context(), restaurantID, startDate, endDate)
+	if err != nil {
+		errorResponse(w, http.StatusInternalServerError, err.Error())
+		return
+	}
+
+	jsonResponse(w, http.StatusOK, analytics)
+}
+
 func (h *APIHandler) GetTodayAnalytics(w http.ResponseWriter, r *http.Request) {
 	claims, ok := middleware.GetStaffClaimsFromContext(r.Context())
 	if !ok {
@@ -1291,13 +1351,47 @@ func (h *APIHandler) GetRestaurantOrders(w http.ResponseWriter, r *http.Request)
 		}
 	}
 
-	orders, err := h.orderService.ListOrders(r.Context(), restaurantID, limit)
+	var startDate, endDate *time.Time
+	if sStr := r.URL.Query().Get("start_date"); sStr != "" {
+		if t, err := parseDateFilter(sStr, false); err == nil {
+			startDate = t
+		}
+	}
+	if eStr := r.URL.Query().Get("end_date"); eStr != "" {
+		if t, err := parseDateFilter(eStr, true); err == nil {
+			endDate = t
+		}
+	}
+
+	orders, err := h.orderService.ListOrders(r.Context(), restaurantID, limit, startDate, endDate)
 	if err != nil {
 		errorResponse(w, http.StatusInternalServerError, err.Error())
 		return
 	}
+	if orders == nil {
+		orders = []order.Order{}
+	}
 
 	jsonResponse(w, http.StatusOK, orders)
+}
+
+func parseDateFilter(val string, endOfDay bool) (*time.Time, error) {
+	val = strings.TrimSpace(val)
+	if val == "" {
+		return nil, nil
+	}
+	if t, err := time.Parse(time.RFC3339, val); err == nil {
+		return &t, nil
+	}
+	if t, err := time.Parse("2006-01-02", val); err == nil {
+		if endOfDay {
+			t = time.Date(t.Year(), t.Month(), t.Day(), 23, 59, 59, 999999999, time.UTC)
+		} else {
+			t = time.Date(t.Year(), t.Month(), t.Day(), 0, 0, 0, 0, time.UTC)
+		}
+		return &t, nil
+	}
+	return nil, fmt.Errorf("invalid date format: %s", val)
 }
 
 func (h *APIHandler) GetSettings(w http.ResponseWriter, r *http.Request) {

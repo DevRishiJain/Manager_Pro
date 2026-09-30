@@ -39,6 +39,9 @@ func main() {
 		"internal/storage/postgres/migrations/003_schema_sync.sql",
 		"internal/storage/postgres/migrations/004_staff_employee_id.sql",
 		"internal/storage/postgres/migrations/005_performance_indexes.sql",
+		"internal/storage/postgres/migrations/006_dining_sessions_vehicle_number.sql",
+		"internal/storage/postgres/migrations/007_expenses_inventory_recipes.sql",
+		"internal/storage/postgres/migrations/008_expense_inventory_order_correlation.sql",
 	}
 
 	for _, file := range migrationFiles {

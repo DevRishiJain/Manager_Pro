@@ -14,6 +14,8 @@ import (
 
 	"github.com/devrishijain/table-manager/internal/domain/audit"
 	"github.com/devrishijain/table-manager/internal/domain/exitpass"
+	"github.com/devrishijain/table-manager/internal/domain/expense"
+	"github.com/devrishijain/table-manager/internal/domain/inventory"
 	"github.com/devrishijain/table-manager/internal/domain/ledger"
 	"github.com/devrishijain/table-manager/internal/domain/order"
 	"github.com/devrishijain/table-manager/internal/domain/payment"
@@ -72,6 +74,12 @@ type MemoryRepository struct {
 
 	outboxEvents  map[uuid.UUID]*storage.OutboxEvent
 	webhookEvents map[string]time.Time
+
+	expenses          map[uuid.UUID]*expense.Expense
+	expenseLineItems  map[uuid.UUID][]expense.ExpenseLineItem
+	inventoryItems    map[uuid.UUID]*inventory.InventoryItem
+	inventoryLogs     map[uuid.UUID]*inventory.InventoryLog
+	recipeIngredients map[uuid.UUID][]inventory.RecipeIngredient
 }
 
 func NewMemoryRepository() *MemoryRepository {
@@ -106,6 +114,11 @@ func NewMemoryRepository() *MemoryRepository {
 		staffActions:      make([]audit.StaffAction, 0),
 		outboxEvents:      make(map[uuid.UUID]*storage.OutboxEvent),
 		webhookEvents:     make(map[string]time.Time),
+		expenses:          make(map[uuid.UUID]*expense.Expense),
+		expenseLineItems:  make(map[uuid.UUID][]expense.ExpenseLineItem),
+		inventoryItems:    make(map[uuid.UUID]*inventory.InventoryItem),
+		inventoryLogs:     make(map[uuid.UUID]*inventory.InventoryLog),
+		recipeIngredients: make(map[uuid.UUID][]inventory.RecipeIngredient),
 	}
 	repo.seedDefaultData()
 	return repo
@@ -355,13 +368,19 @@ func (m *MemoryRepository) ListPendingOrders(ctx context.Context, restaurantID u
 	return res, nil
 }
 
-func (m *MemoryRepository) ListOrders(ctx context.Context, restaurantID uuid.UUID, limit int) ([]order.Order, error) {
+func (m *MemoryRepository) ListOrders(ctx context.Context, restaurantID uuid.UUID, limit int, startDate, endDate *time.Time) ([]order.Order, error) {
 	m.mu.RLock()
 	defer m.mu.RUnlock()
 
 	var res []order.Order
 	for _, o := range m.orders {
 		if o.RestaurantID == restaurantID {
+			if startDate != nil && o.PlacedAt.Before(*startDate) {
+				continue
+			}
+			if endDate != nil && o.PlacedAt.After(*endDate) {
+				continue
+			}
 			cpy := *o
 			cpy.Items = m.orderItems[o.ID]
 			m.enrichOrderDetails(&cpy)
@@ -1307,4 +1326,353 @@ func (m *MemoryRepository) RecordWebhookEvent(ctx context.Context, gateway, even
 	}
 	m.webhookEvents[key] = time.Now()
 	return true, nil // newly recorded
+}
+
+// ---------------- Expenses ----------------
+
+func (m *MemoryRepository) CreateExpense(ctx context.Context, e *expense.Expense) error {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+
+	if e.ID == uuid.Nil {
+		e.ID = uuid.New()
+	}
+	now := time.Now().UTC()
+	if e.CreatedAt.IsZero() {
+		e.CreatedAt = now
+	}
+	if e.UpdatedAt.IsZero() {
+		e.UpdatedAt = now
+	}
+	copied := *e
+	m.expenses[e.ID] = &copied
+
+	if len(e.LineItems) > 0 {
+		var items []expense.ExpenseLineItem
+		for _, li := range e.LineItems {
+			liCopied := li
+			if liCopied.ID == uuid.Nil {
+				liCopied.ID = uuid.New()
+			}
+			liCopied.ExpenseID = e.ID
+			if liCopied.CreatedAt.IsZero() {
+				liCopied.CreatedAt = now
+			}
+			items = append(items, liCopied)
+		}
+		m.expenseLineItems[e.ID] = items
+	}
+	return nil
+}
+
+func (m *MemoryRepository) ListExpenses(ctx context.Context, restaurantID uuid.UUID, expenseType *expense.ExpenseType, category *expense.ExpenseCategory, startDate, endDate *time.Time) ([]expense.Expense, error) {
+	m.mu.RLock()
+	defer m.mu.RUnlock()
+
+	var result []expense.Expense
+	for _, e := range m.expenses {
+		if e.RestaurantID != restaurantID {
+			continue
+		}
+		if expenseType != nil && e.Type != *expenseType {
+			continue
+		}
+		if category != nil && e.Category != *category {
+			continue
+		}
+		if startDate != nil && e.ExpenseDate.Before(*startDate) {
+			continue
+		}
+		if endDate != nil && e.ExpenseDate.After(*endDate) {
+			continue
+		}
+		result = append(result, *e)
+	}
+
+	sort.Slice(result, func(i, j int) bool {
+		if result[i].ExpenseDate.Equal(result[j].ExpenseDate) {
+			return result[i].CreatedAt.After(result[j].CreatedAt)
+		}
+		return result[i].ExpenseDate.After(result[j].ExpenseDate)
+	})
+
+	return result, nil
+}
+
+func (m *MemoryRepository) ListExpenseLineItems(ctx context.Context, expenseID uuid.UUID) ([]expense.ExpenseLineItem, error) {
+	m.mu.RLock()
+	defer m.mu.RUnlock()
+
+	items, ok := m.expenseLineItems[expenseID]
+	if !ok {
+		return nil, nil
+	}
+	res := make([]expense.ExpenseLineItem, len(items))
+	copy(res, items)
+	return res, nil
+}
+
+func (m *MemoryRepository) DeleteExpense(ctx context.Context, restaurantID, expenseID uuid.UUID) error {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+
+	e, ok := m.expenses[expenseID]
+	if !ok || e.RestaurantID != restaurantID {
+		return ErrNotFound
+	}
+	delete(m.expenses, expenseID)
+	delete(m.expenseLineItems, expenseID)
+	return nil
+}
+
+// ---------------- Inventory ----------------
+
+func (m *MemoryRepository) CreateInventoryItem(ctx context.Context, item *inventory.InventoryItem) error {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+
+	if item.ID == uuid.Nil {
+		item.ID = uuid.New()
+	}
+	now := time.Now().UTC()
+	if item.CreatedAt.IsZero() {
+		item.CreatedAt = now
+	}
+	if item.UpdatedAt.IsZero() {
+		item.UpdatedAt = now
+	}
+	copied := *item
+	m.inventoryItems[item.ID] = &copied
+	return nil
+}
+
+func (m *MemoryRepository) GetInventoryItemByID(ctx context.Context, restaurantID, id uuid.UUID) (*inventory.InventoryItem, error) {
+	m.mu.RLock()
+	defer m.mu.RUnlock()
+
+	item, ok := m.inventoryItems[id]
+	if !ok || item.RestaurantID != restaurantID {
+		return nil, ErrNotFound
+	}
+	copied := *item
+	return &copied, nil
+}
+
+func (m *MemoryRepository) ListInventoryItems(ctx context.Context, restaurantID uuid.UUID) ([]inventory.InventoryItem, error) {
+	m.mu.RLock()
+	defer m.mu.RUnlock()
+
+	var result []inventory.InventoryItem
+	for _, item := range m.inventoryItems {
+		if item.RestaurantID == restaurantID {
+			result = append(result, *item)
+		}
+	}
+	sort.Slice(result, func(i, j int) bool {
+		return result[i].Name < result[j].Name
+	})
+	return result, nil
+}
+
+func (m *MemoryRepository) UpdateInventoryItem(ctx context.Context, item *inventory.InventoryItem) error {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+
+	existing, ok := m.inventoryItems[item.ID]
+	if !ok || existing.RestaurantID != item.RestaurantID {
+		return ErrNotFound
+	}
+	item.UpdatedAt = time.Now().UTC()
+	copied := *item
+	m.inventoryItems[item.ID] = &copied
+	return nil
+}
+
+func (m *MemoryRepository) DeleteInventoryItem(ctx context.Context, restaurantID, id uuid.UUID) error {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+
+	existing, ok := m.inventoryItems[id]
+	if !ok || existing.RestaurantID != restaurantID {
+		return ErrNotFound
+	}
+	delete(m.inventoryItems, id)
+	return nil
+}
+
+func (m *MemoryRepository) CreateInventoryLog(ctx context.Context, log *inventory.InventoryLog) error {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+
+	item, ok := m.inventoryItems[log.InventoryItemID]
+	if !ok || item.RestaurantID != log.RestaurantID {
+		return ErrNotFound
+	}
+
+	if log.ID == uuid.Nil {
+		log.ID = uuid.New()
+	}
+	if log.LoggedAt.IsZero() {
+		log.LoggedAt = time.Now().UTC()
+	}
+
+	switch log.ChangeType {
+	case inventory.ChangeStockIn:
+		item.CurrentStock += log.Quantity
+		if log.UnitCost.AmountMinorUnits > 0 {
+			item.UnitCost = log.UnitCost
+		}
+	case inventory.ChangeWastage, inventory.ChangeOrderConsumption:
+		item.CurrentStock -= log.Quantity
+	case inventory.ChangeAdjustment:
+		item.CurrentStock = log.Quantity
+	}
+	item.UpdatedAt = time.Now().UTC()
+
+	copied := *log
+	copied.ItemName = item.Name
+	copied.Unit = item.Unit
+	m.inventoryLogs[log.ID] = &copied
+	return nil
+}
+
+func (m *MemoryRepository) ListInventoryLogs(ctx context.Context, restaurantID uuid.UUID, itemID *uuid.UUID, limit int) ([]inventory.InventoryLog, error) {
+	m.mu.RLock()
+	defer m.mu.RUnlock()
+
+	var result []inventory.InventoryLog
+	for _, l := range m.inventoryLogs {
+		if l.RestaurantID != restaurantID {
+			continue
+		}
+		if itemID != nil && l.InventoryItemID != *itemID {
+			continue
+		}
+		result = append(result, *l)
+	}
+
+	sort.Slice(result, func(i, j int) bool {
+		return result[i].LoggedAt.After(result[j].LoggedAt)
+	})
+
+	if limit > 0 && len(result) > limit {
+		result = result[:limit]
+	}
+	return result, nil
+}
+
+// ---------------- Recipes & Costing ----------------
+
+func (m *MemoryRepository) SaveRecipeIngredients(ctx context.Context, restaurantID, menuItemID uuid.UUID, ingredients []inventory.RecipeIngredient) error {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+
+	now := time.Now().UTC()
+	for i := range ingredients {
+		if ingredients[i].ID == uuid.Nil {
+			ingredients[i].ID = uuid.New()
+		}
+		ingredients[i].RestaurantID = restaurantID
+		ingredients[i].MenuItemID = menuItemID
+		if ingredients[i].CreatedAt.IsZero() {
+			ingredients[i].CreatedAt = now
+		}
+		ingredients[i].UpdatedAt = now
+	}
+	m.recipeIngredients[menuItemID] = ingredients
+	return nil
+}
+
+func (m *MemoryRepository) GetRecipeIngredientsByMenuItemID(ctx context.Context, restaurantID, menuItemID uuid.UUID) ([]inventory.RecipeIngredient, error) {
+	m.mu.RLock()
+	defer m.mu.RUnlock()
+
+	ings, ok := m.recipeIngredients[menuItemID]
+	if !ok {
+		return []inventory.RecipeIngredient{}, nil
+	}
+
+	result := make([]inventory.RecipeIngredient, len(ings))
+	for i, ing := range ings {
+		result[i] = ing
+		if item, itemOk := m.inventoryItems[ing.InventoryItemID]; itemOk {
+			result[i].ItemName = item.Name
+			result[i].Unit = item.Unit
+			result[i].UnitCost = item.UnitCost
+			costContrib := int64(float64(item.UnitCost.AmountMinorUnits) * ing.QuantityRequired)
+			result[i].CostContribution = money.NewWithCurrency(costContrib, item.UnitCost.Currency)
+		}
+	}
+	return result, nil
+}
+
+func (m *MemoryRepository) ListDishMargins(ctx context.Context, restaurantID uuid.UUID) ([]inventory.DishMargin, error) {
+	m.mu.RLock()
+	defer m.mu.RUnlock()
+
+	var result []inventory.DishMargin
+	for _, item := range m.menuItems {
+		if item.RestaurantID != restaurantID {
+			continue
+		}
+		categoryName := ""
+		if cat, catOk := m.categories[item.CategoryID]; catOk {
+			categoryName = cat.Name
+		}
+
+		var totalCostMinor int64
+		ings := m.recipeIngredients[item.ID]
+		for _, ing := range ings {
+			if invItem, invOk := m.inventoryItems[ing.InventoryItemID]; invOk {
+				totalCostMinor += int64(float64(invItem.UnitCost.AmountMinorUnits) * ing.QuantityRequired)
+			}
+		}
+
+		sellingMinor := item.Price.AmountMinorUnits
+		grossProfitMinor := sellingMinor - totalCostMinor
+		var marginPct float64
+		if sellingMinor > 0 {
+			marginPct = float64(grossProfitMinor) / float64(sellingMinor) * 100.0
+		}
+
+		result = append(result, inventory.DishMargin{
+			MenuItemID:   item.ID,
+			MenuItemName: item.Name,
+			CategoryName: categoryName,
+			SellingPrice: item.Price,
+			CostPrice:    money.NewWithCurrency(totalCostMinor, item.Price.Currency),
+			GrossProfit:  money.NewWithCurrency(grossProfitMinor, item.Price.Currency),
+			MarginPct:    marginPct,
+		})
+	}
+
+	sort.Slice(result, func(i, j int) bool {
+		return result[i].MenuItemName < result[j].MenuItemName
+	})
+
+	return result, nil
+}
+
+func (m *MemoryRepository) ListRecipeIngredientsForOrder(ctx context.Context, orderID uuid.UUID) ([]inventory.OrderIngredientRequirement, error) {
+	m.mu.RLock()
+	defer m.mu.RUnlock()
+
+	items := m.orderItems[orderID]
+	totals := make(map[uuid.UUID]float64)
+
+	for _, item := range items {
+		recipe := m.recipeIngredients[item.MenuItemID]
+		for _, ing := range recipe {
+			totals[ing.InventoryItemID] += ing.QuantityRequired * float64(item.Quantity)
+		}
+	}
+
+	var result []inventory.OrderIngredientRequirement
+	for itemID, qty := range totals {
+		result = append(result, inventory.OrderIngredientRequirement{
+			InventoryItemID: itemID,
+			Quantity:        qty,
+		})
+	}
+	return result, nil
 }

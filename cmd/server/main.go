@@ -120,6 +120,10 @@ func main() {
 	)
 	apiHandler.SetStaffService(staffSvc)
 	apiHandler.SetJWTSecret([]byte(cfg.Auth.JWTSecret))
+	expSvc := service.NewExpenseService(repo)
+	invSvc := service.NewInventoryService(repo)
+	apiHandler.SetExpenseService(expSvc)
+	apiHandler.SetInventoryService(invSvc)
 	if aiCatalogSvc != nil {
 		apiHandler.SetAICatalogService(aiCatalogSvc)
 	}

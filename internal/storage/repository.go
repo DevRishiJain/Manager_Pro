@@ -8,6 +8,8 @@ import (
 
 	"github.com/devrishijain/table-manager/internal/domain/audit"
 	"github.com/devrishijain/table-manager/internal/domain/exitpass"
+	"github.com/devrishijain/table-manager/internal/domain/expense"
+	"github.com/devrishijain/table-manager/internal/domain/inventory"
 	"github.com/devrishijain/table-manager/internal/domain/ledger"
 	"github.com/devrishijain/table-manager/internal/domain/order"
 	"github.com/devrishijain/table-manager/internal/domain/payment"
@@ -66,7 +68,7 @@ type Repository interface {
 	UpdateOrder(ctx context.Context, o *order.Order) error
 	ListKitchenQueue(ctx context.Context, restaurantID uuid.UUID, statuses []order.State) ([]order.Order, error)
 	ListPendingOrders(ctx context.Context, restaurantID uuid.UUID) ([]order.Order, error)
-	ListOrders(ctx context.Context, restaurantID uuid.UUID, limit int) ([]order.Order, error)
+	ListOrders(ctx context.Context, restaurantID uuid.UUID, limit int, startDate, endDate *time.Time) ([]order.Order, error)
 
 	// Payment
 	CreatePayment(ctx context.Context, p *payment.Payment) error
@@ -142,4 +144,25 @@ type Repository interface {
 
 	// Webhook Idempotency
 	RecordWebhookEvent(ctx context.Context, gateway, eventID string) (bool, error) // returns true if newly inserted, false if duplicate
+
+	// Expenses
+	CreateExpense(ctx context.Context, e *expense.Expense) error
+	ListExpenses(ctx context.Context, restaurantID uuid.UUID, expenseType *expense.ExpenseType, category *expense.ExpenseCategory, startDate, endDate *time.Time) ([]expense.Expense, error)
+	ListExpenseLineItems(ctx context.Context, expenseID uuid.UUID) ([]expense.ExpenseLineItem, error)
+	DeleteExpense(ctx context.Context, restaurantID, expenseID uuid.UUID) error
+
+	// Inventory
+	CreateInventoryItem(ctx context.Context, item *inventory.InventoryItem) error
+	GetInventoryItemByID(ctx context.Context, restaurantID, id uuid.UUID) (*inventory.InventoryItem, error)
+	ListInventoryItems(ctx context.Context, restaurantID uuid.UUID) ([]inventory.InventoryItem, error)
+	UpdateInventoryItem(ctx context.Context, item *inventory.InventoryItem) error
+	DeleteInventoryItem(ctx context.Context, restaurantID, id uuid.UUID) error
+	CreateInventoryLog(ctx context.Context, log *inventory.InventoryLog) error
+	ListInventoryLogs(ctx context.Context, restaurantID uuid.UUID, itemID *uuid.UUID, limit int) ([]inventory.InventoryLog, error)
+
+	// Recipes & Costing
+	SaveRecipeIngredients(ctx context.Context, restaurantID, menuItemID uuid.UUID, ingredients []inventory.RecipeIngredient) error
+	GetRecipeIngredientsByMenuItemID(ctx context.Context, restaurantID, menuItemID uuid.UUID) ([]inventory.RecipeIngredient, error)
+	ListDishMargins(ctx context.Context, restaurantID uuid.UUID) ([]inventory.DishMargin, error)
+	ListRecipeIngredientsForOrder(ctx context.Context, orderID uuid.UUID) ([]inventory.OrderIngredientRequirement, error)
 }

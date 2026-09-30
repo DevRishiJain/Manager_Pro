@@ -102,6 +102,7 @@ func NewRouter(handler *handlers.APIHandler, repo storage.Repository, jwtSecret 
 
 			// Dashboard Overview & Performance (§8A)
 			tr.Get("/restaurant/dashboard/overview", handler.GetDashboardOverview)
+			tr.Get("/restaurant/analytics/dashboard", handler.GetExecutiveDashboardAnalytics)
 			tr.Get("/restaurant/analytics/today", handler.GetTodayAnalytics)
 			tr.Get("/restaurant/analytics/month-to-date", handler.GetMonthToDateAnalytics)
 			tr.Get("/restaurant/analytics/compare", handler.GetPeriodComparison)
@@ -109,6 +110,25 @@ func NewRouter(handler *handlers.APIHandler, repo storage.Repository, jwtSecret 
 			tr.Get("/restaurant/analytics/forecast", handler.GetSalesForecast)
 			tr.Get("/restaurant/analytics/table-performance", handler.GetTablePerformance)
 			tr.Get("/restaurant/analytics/menu-performance", handler.GetMenuPerformance)
+
+			// Expenses Management
+			tr.Get("/restaurant/expenses", handler.ListExpenses)
+			tr.Post("/restaurant/expenses", handler.CreateExpense)
+			tr.Get("/restaurant/expenses/{id}/items", handler.GetExpenseLineItems)
+			tr.Delete("/restaurant/expenses/{id}", handler.DeleteExpense)
+
+			// Inventory & Stock Management
+			tr.Get("/restaurant/inventory", handler.ListInventory)
+			tr.Post("/restaurant/inventory", handler.CreateInventoryItem)
+			tr.Put("/restaurant/inventory/{id}", handler.UpdateInventoryItem)
+			tr.Delete("/restaurant/inventory/{id}", handler.DeleteInventoryItem)
+			tr.Post("/restaurant/inventory/{id}/stock", handler.LogStockMovement)
+			tr.Get("/restaurant/inventory/logs", handler.ListInventoryLogs)
+
+			// Recipe Costing & Dish Margins
+			tr.Get("/restaurant/recipes/{menu_item_id}", handler.GetRecipe)
+			tr.Post("/restaurant/recipes/{menu_item_id}", handler.SaveRecipe)
+			tr.Get("/restaurant/recipes/margins", handler.ListDishMargins)
 
 			// Ledger & Settlements (§6, §6A)
 			tr.Get("/restaurant/ledger", handler.GetLedgerPayable)

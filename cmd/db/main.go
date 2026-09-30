@@ -22,7 +22,7 @@ func main() {
 	}
 	defer pool.Close()
 
-	query := "SELECT o.sequence_number, o.status, o.table_number, o.total_minor, o.placed_at FROM orders o ORDER BY o.placed_at DESC LIMIT 15;"
+	query := "SELECT r.name AS restaurant, o.sequence_number, o.status, o.table_number, (o.total_minor::float8 / 100)::text AS total_rs, o.placed_at FROM orders o JOIN restaurants r ON o.restaurant_id = r.id ORDER BY o.placed_at DESC LIMIT 15;"
 	if len(os.Args) > 1 {
 		query = strings.Join(os.Args[1:], " ")
 	}
