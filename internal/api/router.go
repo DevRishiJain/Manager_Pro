@@ -39,6 +39,8 @@ func NewRouter(handler *handlers.APIHandler, repo storage.Repository, jwtSecret 
 	r.Route("/api/v1", func(api chi.Router) {
 		// Public routes
 		api.Post("/session/start", handler.StartSession)
+		api.Get("/public/restaurant/check-handle", handler.CheckHandleAvailability)
+		api.Get("/public/restaurant/{identifier}", handler.LookupRestaurantPublic)
 		api.Post("/staff/login", handler.StaffLogin)
 		api.Post("/auth/staff/login", handler.StaffLogin)
 		api.Post("/public/onboard", handler.OnboardRestaurant)
@@ -62,6 +64,7 @@ func NewRouter(handler *handlers.APIHandler, repo storage.Repository, jwtSecret 
 		// Staff routes (Staff JWT auth)
 		api.Group(func(sr chi.Router) {
 			sr.Use(middleware.StaffAuth(jwtSecret))
+			sr.Post("/staff/sessions/start", handler.StaffStartSession)
 			sr.Post("/staff/sessions/{id}/verify-first-order", handler.VerifyFirstOrder)
 			sr.Post("/staff/sessions/{id}/orders", handler.PlaceOrder)
 			sr.Post("/staff/sessions/{id}/verify-exit", handler.StaffVerifyExit)
@@ -148,6 +151,7 @@ func NewRouter(handler *handlers.APIHandler, repo storage.Repository, jwtSecret 
 			// Staff Management
 			tr.Get("/restaurant/staff", handler.ListStaff)
 			tr.Post("/restaurant/staff", handler.CreateStaff)
+			tr.Put("/restaurant/staff/{id}/password", handler.UpdateStaffPassword)
 
 			// Settings & Onboarding
 			tr.Get("/restaurant/settings", handler.GetSettings)

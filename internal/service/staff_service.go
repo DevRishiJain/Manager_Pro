@@ -162,21 +162,79 @@ func (s *StaffService) Authenticate(ctx context.Context, identifier, password st
 	var staff *restaurant.StaffUser
 	var err error
 
-	// 1. Try finding by email
-	staff, err = s.repo.GetStaffByEmail(ctx, strings.ToLower(trimmedIdentifier))
-	if err != nil || staff == nil {
-		// 2. If restaurant ID provided, check restaurant-specific employee ID
-		if restaurantID != nil && *restaurantID != uuid.Nil {
-			staff, err = s.repo.GetStaffByEmployeeID(ctx, *restaurantID, strings.ToUpper(trimmedIdentifier))
+	// 1. If restaurant ID provided, check restaurant-specific employee ID first
+	if restaurantID != nil && *restaurantID != uuid.Nil {
+		staff, err = s.repo.GetStaffByEmployeeID(ctx, *restaurantID, strings.ToUpper(trimmedIdentifier))
+	}
+
+	// 2. Try finding by email
+	if staff == nil {
+		staff, err = s.repo.GetStaffByEmail(ctx, strings.ToLower(trimmedIdentifier))
+	}
+
+	// 3. Try finding by staff name or email username within restaurant
+	if staff == nil && restaurantID != nil && *restaurantID != uuid.Nil {
+		staffList, _ := s.repo.ListStaff(ctx, *restaurantID)
+		lowerID := strings.ToLower(trimmedIdentifier)
+
+		for _, st := range staffList {
+			cleanName := strings.ToLower(strings.TrimSpace(st.Name))
+			// Remove parenthetical annotations like "(Floor Waiter)", "(Head Chef)"
+			if idx := strings.Index(cleanName, "("); idx != -1 {
+				cleanName = strings.TrimSpace(cleanName[:idx])
+			}
+
+			// Full name match (e.g. "Aman Verma")
+			if cleanName == lowerID {
+				cpy := st
+				staff = &cpy
+				break
+			}
+
+			// First name match (e.g. "Aman")
+			fields := strings.Fields(cleanName)
+			if len(fields) > 0 && fields[0] == lowerID {
+				cpy := st
+				staff = &cpy
+				break
+			}
+
+			// Any single word in name match (e.g. "Rajesh" in "Chef Rajesh")
+			for _, word := range fields {
+				if word == lowerID {
+					cpy := st
+					staff = &cpy
+					break
+				}
+			}
+			if staff != nil {
+				break
+			}
+
+			// Email prefix match (e.g. "aman.waiter" from "aman.waiter@...")
+			emailPrefix := strings.ToLower(strings.Split(st.Email, "@")[0])
+			if emailPrefix == lowerID || strings.HasPrefix(emailPrefix, lowerID) {
+				cpy := st
+				staff = &cpy
+				break
+			}
 		}
-		// 3. Fallback: Check global employee ID across the system
-		if staff == nil {
-			staff, err = s.repo.GetStaffByEmployeeIDGlobal(ctx, strings.ToUpper(trimmedIdentifier))
-		}
+	}
+
+	// 4. Fallback: Check global employee ID across the system
+	if staff == nil {
+		staff, err = s.repo.GetStaffByEmployeeIDGlobal(ctx, strings.ToUpper(trimmedIdentifier))
 	}
 
 	if staff == nil {
 		return nil, ErrInvalidCredentials
+	}
+
+	// Tenancy check: Ensure staff belongs to the specified restaurant (unless platform super admin)
+	if restaurantID != nil && *restaurantID != uuid.Nil && staff.Role != restaurant.RoleSuperAdmin {
+		if staff.RestaurantID != *restaurantID {
+			return nil, ErrInvalidCredentials
+		}
 	}
 
 	if !staff.IsActive {
@@ -217,4 +275,50 @@ func (s *StaffService) Authenticate(ctx context.Context, identifier, password st
 		Token: token,
 		Staff: staff,
 	}, nil
+}
+
+// UpdateStaffPassword allows an authorized manager/admin to change an employee's password.
+func (s *StaffService) UpdateStaffPassword(ctx context.Context, staffID uuid.UUID, newPassword string, requesterStaffID uuid.UUID) error {
+	trimmed := strings.TrimSpace(newPassword)
+	if trimmed == "" {
+		return errors.New("new password cannot be empty")
+	}
+	if len(trimmed) < 6 {
+		return errors.New("password must be at least 6 characters")
+	}
+
+	hash, err := bcrypt.GenerateFromPassword([]byte(trimmed), bcrypt.DefaultCost)
+	if err != nil {
+		return fmt.Errorf("failed to hash password: %w", err)
+	}
+
+	staff, err := s.repo.GetStaffByID(ctx, staffID)
+	if err != nil || staff == nil {
+		return errors.New("staff member not found")
+	}
+
+	if err := s.repo.UpdateStaffPassword(ctx, staffID, string(hash)); err != nil {
+		return err
+	}
+
+	now := time.Now()
+	_ = s.repo.AppendAuditLog(ctx, &audit.AuditLog{
+		ID:           uuid.New(),
+		ActorType:    audit.ActorTypeStaff,
+		ActorID:      requesterStaffID.String(),
+		RestaurantID: staff.RestaurantID,
+		Action:       "STAFF_PASSWORD_UPDATED",
+		CreatedAt:    now,
+	})
+
+	_ = s.repo.AppendStaffAction(ctx, &audit.StaffAction{
+		ID:           uuid.New(),
+		StaffID:      requesterStaffID,
+		RestaurantID: staff.RestaurantID,
+		ActionType:   "STAFF_PASSWORD_RESET",
+		Reason:       fmt.Sprintf("Reset password for %s (%s)", staff.Name, staff.EmployeeID),
+		CreatedAt:    now,
+	})
+
+	return nil
 }

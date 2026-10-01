@@ -1033,15 +1033,39 @@ func (r *PostgresRepository) GetRestaurantByID(ctx context.Context, id uuid.UUID
 	if r.pool != nil {
 		var rest restaurant.Restaurant
 		err := r.pool.QueryRow(ctx, `
-			SELECT id, name, gstin, commission_rate_bps, settlement_bank_details, status, timezone, created_at, updated_at
+			SELECT id, name, COALESCE(slug, ''), gstin, commission_rate_bps, settlement_bank_details, status, timezone, created_at, updated_at
 			FROM restaurants
 			WHERE id = $1;
-		`, id).Scan(&rest.ID, &rest.Name, &rest.GSTIN, &rest.CommissionRateBps, &rest.SettlementBankDetails, &rest.Status, &rest.Timezone, &rest.CreatedAt, &rest.UpdatedAt)
+		`, id).Scan(&rest.ID, &rest.Name, &rest.Slug, &rest.GSTIN, &rest.CommissionRateBps, &rest.SettlementBankDetails, &rest.Status, &rest.Timezone, &rest.CreatedAt, &rest.UpdatedAt)
 		if err == nil {
 			return &rest, nil
 		}
 	}
 	return r.mem.GetRestaurantByID(ctx, id)
+}
+
+func (r *PostgresRepository) GetRestaurantBySlug(ctx context.Context, slug string) (*restaurant.Restaurant, error) {
+	target := strings.ToLower(strings.TrimSpace(slug))
+	target = strings.TrimPrefix(target, "@")
+	targetAlpha := strings.ReplaceAll(strings.ReplaceAll(target, "-", ""), "_", "")
+
+	if r.pool != nil {
+		var rest restaurant.Restaurant
+		err := r.pool.QueryRow(ctx, `
+			SELECT id, name, COALESCE(slug, ''), gstin, commission_rate_bps, settlement_bank_details, status, timezone, created_at, updated_at
+			FROM restaurants
+			WHERE LOWER(slug) = $1
+			   OR LOWER(slug) = $2
+			   OR LOWER(REPLACE(REPLACE(slug, '-', ''), '_', '')) = $2
+			   OR LOWER(REPLACE(TRIM(name), ' ', '-')) = $1
+			   OR LOWER(REPLACE(TRIM(name), ' ', '')) = $2
+			LIMIT 1;
+		`, target, targetAlpha).Scan(&rest.ID, &rest.Name, &rest.Slug, &rest.GSTIN, &rest.CommissionRateBps, &rest.SettlementBankDetails, &rest.Status, &rest.Timezone, &rest.CreatedAt, &rest.UpdatedAt)
+		if err == nil {
+			return &rest, nil
+		}
+	}
+	return r.mem.GetRestaurantBySlug(ctx, slug)
 }
 
 func (r *PostgresRepository) ListRestaurants(ctx context.Context) ([]restaurant.Restaurant, error) {
@@ -1224,6 +1248,22 @@ func (r *PostgresRepository) ListStaff(ctx context.Context, restaurantID uuid.UU
 		}
 	}
 	return r.mem.ListStaff(ctx, restaurantID)
+}
+
+func (r *PostgresRepository) UpdateStaffPassword(ctx context.Context, staffID uuid.UUID, passwordHash string) error {
+	if r.pool != nil {
+		_, err := r.pool.Exec(ctx, `
+			UPDATE staff_users
+			SET password_hash = $1, updated_at = NOW()
+			WHERE id = $2;
+		`, passwordHash, staffID)
+		if err != nil {
+			return err
+		}
+		_ = r.mem.UpdateStaffPassword(ctx, staffID, passwordHash)
+		return nil
+	}
+	return r.mem.UpdateStaffPassword(ctx, staffID, passwordHash)
 }
 
 func (r *PostgresRepository) CreateGuard(ctx context.Context, g *restaurant.GuardUser) error {

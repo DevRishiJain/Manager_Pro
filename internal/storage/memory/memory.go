@@ -650,6 +650,32 @@ func (m *MemoryRepository) GetRestaurantByID(ctx context.Context, id uuid.UUID) 
 	return &cpy, nil
 }
 
+func (m *MemoryRepository) GetRestaurantBySlug(ctx context.Context, slug string) (*restaurant.Restaurant, error) {
+	m.mu.RLock()
+	defer m.mu.RUnlock()
+
+	target := strings.ToLower(strings.TrimSpace(slug))
+	target = strings.TrimPrefix(target, "@")
+	targetAlpha := strings.ReplaceAll(strings.ReplaceAll(target, "-", ""), "_", "")
+
+	for _, r := range m.restaurants {
+		cleanSlug := strings.ToLower(strings.TrimSpace(r.Slug))
+		cleanSlugAlpha := strings.ReplaceAll(strings.ReplaceAll(cleanSlug, "-", ""), "_", "")
+		if cleanSlug != "" && (cleanSlug == target || cleanSlugAlpha == targetAlpha) {
+			cpy := *r
+			return &cpy, nil
+		}
+		// Match on name
+		nameSlug := strings.ToLower(strings.ReplaceAll(strings.TrimSpace(r.Name), " ", "-"))
+		nameAlpha := strings.ReplaceAll(strings.ToLower(strings.TrimSpace(r.Name)), " ", "")
+		if nameSlug == target || nameAlpha == targetAlpha {
+			cpy := *r
+			return &cpy, nil
+		}
+	}
+	return nil, ErrNotFound
+}
+
 func (m *MemoryRepository) ListRestaurants(ctx context.Context) ([]restaurant.Restaurant, error) {
 	m.mu.RLock()
 	defer m.mu.RUnlock()
@@ -789,6 +815,19 @@ func (m *MemoryRepository) GetStaffByEmployeeIDGlobal(ctx context.Context, emplo
 		}
 	}
 	return nil, ErrNotFound
+}
+
+func (m *MemoryRepository) UpdateStaffPassword(ctx context.Context, staffID uuid.UUID, passwordHash string) error {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+
+	s, ok := m.staff[staffID]
+	if !ok {
+		return ErrNotFound
+	}
+	s.PasswordHash = passwordHash
+	s.UpdatedAt = time.Now()
+	return nil
 }
 
 func (m *MemoryRepository) seedDefaultData() {

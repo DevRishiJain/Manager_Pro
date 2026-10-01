@@ -97,6 +97,7 @@ type Repository interface {
 	// Restaurant Catalog & Config
 	CreateRestaurant(ctx context.Context, r *restaurant.Restaurant) error
 	GetRestaurantByID(ctx context.Context, id uuid.UUID) (*restaurant.Restaurant, error)
+	GetRestaurantBySlug(ctx context.Context, slug string) (*restaurant.Restaurant, error)
 	ListRestaurants(ctx context.Context) ([]restaurant.Restaurant, error)
 	UpdateRestaurant(ctx context.Context, r *restaurant.Restaurant) error
 
@@ -111,6 +112,7 @@ type Repository interface {
 	GetStaffByEmployeeID(ctx context.Context, restaurantID uuid.UUID, employeeID string) (*restaurant.StaffUser, error)
 	GetStaffByEmployeeIDGlobal(ctx context.Context, employeeID string) (*restaurant.StaffUser, error)
 	ListStaff(ctx context.Context, restaurantID uuid.UUID) ([]restaurant.StaffUser, error)
+	UpdateStaffPassword(ctx context.Context, staffID uuid.UUID, passwordHash string) error
 
 	CreateGuard(ctx context.Context, g *restaurant.GuardUser) error
 	GetGuardByID(ctx context.Context, id uuid.UUID) (*restaurant.GuardUser, error)

@@ -1254,6 +1254,125 @@ type StaffLoginRequest struct {
 	RestaurantID string `json:"restaurant_id,omitempty"`
 }
 
+func (h *APIHandler) CheckHandleAvailability(w http.ResponseWriter, r *http.Request) {
+	handle := strings.TrimSpace(r.URL.Query().Get("handle"))
+	handle = strings.ToLower(strings.TrimPrefix(handle, "@"))
+
+	if handle == "" {
+		errorResponse(w, http.StatusBadRequest, "handle query parameter is required")
+		return
+	}
+
+	if len(handle) < 2 || len(handle) > 32 {
+		jsonResponse(w, http.StatusOK, map[string]interface{}{
+			"handle":    handle,
+			"available": false,
+			"exists":    false,
+			"message":   "Handle must be between 2 and 32 characters",
+		})
+		return
+	}
+
+	rest, err := h.repo.GetRestaurantBySlug(r.Context(), handle)
+	exists := (err == nil && rest != nil)
+
+	res := map[string]interface{}{
+		"handle":    handle,
+		"available": !exists,
+		"exists":    exists,
+	}
+
+	if exists && rest != nil {
+		res["restaurant"] = map[string]interface{}{
+			"id":         rest.ID,
+			"name":       rest.Name,
+			"slug":       rest.Slug,
+			"venue_type": rest.VenueType,
+			"status":     rest.Status,
+		}
+	}
+
+	jsonResponse(w, http.StatusOK, res)
+}
+
+func (h *APIHandler) LookupRestaurantPublic(w http.ResponseWriter, r *http.Request) {
+	identifier := strings.TrimSpace(chi.URLParam(r, "identifier"))
+	identifier = strings.TrimPrefix(identifier, "@")
+	if identifier == "" {
+		errorResponse(w, http.StatusBadRequest, "restaurant identifier is required")
+		return
+	}
+
+	var rest *restaurant.Restaurant
+	var err error
+
+	if parsed, parseErr := uuid.Parse(identifier); parseErr == nil && parsed != uuid.Nil {
+		rest, err = h.repo.GetRestaurantByID(r.Context(), parsed)
+	}
+	if rest == nil {
+		rest, err = h.repo.GetRestaurantBySlug(r.Context(), identifier)
+	}
+
+	if err != nil || rest == nil {
+		errorResponse(w, http.StatusNotFound, "restaurant not found")
+		return
+	}
+
+	jsonResponse(w, http.StatusOK, map[string]interface{}{
+		"id":         rest.ID,
+		"name":       rest.Name,
+		"slug":       rest.Slug,
+		"venue_type": rest.VenueType,
+		"status":     rest.Status,
+	})
+}
+
+type UpdateStaffPasswordRequest struct {
+	Password string `json:"password"`
+}
+
+func (h *APIHandler) UpdateStaffPassword(w http.ResponseWriter, r *http.Request) {
+	claims, ok := middleware.GetStaffClaimsFromContext(r.Context())
+	if !ok {
+		errorResponse(w, http.StatusUnauthorized, "unauthorized staff")
+		return
+	}
+
+	targetStaffIDStr := chi.URLParam(r, "id")
+	targetStaffID, err := uuid.Parse(targetStaffIDStr)
+	if err != nil {
+		errorResponse(w, http.StatusBadRequest, "invalid staff id")
+		return
+	}
+
+	var req UpdateStaffPasswordRequest
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		errorResponse(w, http.StatusBadRequest, "invalid request body")
+		return
+	}
+
+	targetStaff, err := h.repo.GetStaffByID(r.Context(), targetStaffID)
+	if err != nil || targetStaff == nil {
+		errorResponse(w, http.StatusNotFound, "staff member not found")
+		return
+	}
+
+	if !claims.IsPlatform && targetStaff.RestaurantID != claims.RestaurantID {
+		errorResponse(w, http.StatusForbidden, "cannot modify staff from another restaurant")
+		return
+	}
+
+	if err := h.getStaffService().UpdateStaffPassword(r.Context(), targetStaffID, req.Password, claims.StaffID); err != nil {
+		errorResponse(w, http.StatusBadRequest, err.Error())
+		return
+	}
+
+	jsonResponse(w, http.StatusOK, map[string]interface{}{
+		"status":  "success",
+		"message": fmt.Sprintf("Password updated for %s", targetStaff.Name),
+	})
+}
+
 func (h *APIHandler) StaffLogin(w http.ResponseWriter, r *http.Request) {
 	var req StaffLoginRequest
 	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
@@ -1262,9 +1381,15 @@ func (h *APIHandler) StaffLogin(w http.ResponseWriter, r *http.Request) {
 	}
 
 	var restID *uuid.UUID
-	if strings.TrimSpace(req.RestaurantID) != "" {
-		if parsed, err := uuid.Parse(strings.TrimSpace(req.RestaurantID)); err == nil && parsed != uuid.Nil {
+	trimmedRest := strings.TrimSpace(req.RestaurantID)
+	if trimmedRest != "" {
+		if parsed, err := uuid.Parse(trimmedRest); err == nil && parsed != uuid.Nil {
 			restID = &parsed
+		} else {
+			// Resolve by slug
+			if rest, err := h.repo.GetRestaurantBySlug(r.Context(), trimmedRest); err == nil && rest != nil {
+				restID = &rest.ID
+			}
 		}
 	}
 
@@ -1275,6 +1400,106 @@ func (h *APIHandler) StaffLogin(w http.ResponseWriter, r *http.Request) {
 	}
 
 	jsonResponse(w, http.StatusOK, result)
+}
+
+type StaffStartSessionRequest struct {
+	TableID        string `json:"table_id,omitempty"`
+	TableNumber    string `json:"table_number,omitempty"`
+	TableToken     string `json:"table_token,omitempty"`
+	CustomerName   string `json:"customer_name,omitempty"`
+	CustomerPhone  string `json:"customer_phone,omitempty"`
+	GuestCount     int    `json:"guest_count,omitempty"`
+	VehicleNumber  string `json:"vehicle_number,omitempty"`
+}
+
+func (h *APIHandler) StaffStartSession(w http.ResponseWriter, r *http.Request) {
+	claims, ok := middleware.GetStaffClaimsFromContext(r.Context())
+	if !ok {
+		errorResponse(w, http.StatusUnauthorized, "unauthorized staff")
+		return
+	}
+
+	var req StaffStartSessionRequest
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		errorResponse(w, http.StatusBadRequest, "invalid request payload")
+		return
+	}
+
+	var targetTable *restaurant.Table
+	// 1. Try finding by token
+	if strings.TrimSpace(req.TableToken) != "" {
+		if t, err := h.repo.GetTableByToken(r.Context(), strings.TrimSpace(req.TableToken)); err == nil && t != nil {
+			targetTable = t
+		}
+	}
+	// 2. Try finding by ID
+	if targetTable == nil && strings.TrimSpace(req.TableID) != "" {
+		if parsed, err := uuid.Parse(strings.TrimSpace(req.TableID)); err == nil {
+			if t, err := h.repo.GetTableByID(r.Context(), parsed); err == nil && t != nil {
+				targetTable = t
+			}
+		}
+	}
+	// 3. Try finding by table number within staff's restaurant (supports "1", "T1", "Table 1")
+	if targetTable == nil && strings.TrimSpace(req.TableNumber) != "" {
+		tables, _ := h.repo.ListTables(r.Context(), claims.RestaurantID)
+		cleanReq := strings.TrimSpace(strings.ToLower(req.TableNumber))
+		cleanReqNum := strings.TrimPrefix(strings.TrimPrefix(cleanReq, "table "), "t")
+
+		for _, t := range tables {
+			cleanT := strings.TrimSpace(strings.ToLower(t.TableNumber))
+			cleanTNum := strings.TrimPrefix(strings.TrimPrefix(cleanT, "table "), "t")
+
+			if cleanT == cleanReq || (cleanReqNum != "" && cleanTNum == cleanReqNum) {
+				targetTable = &t
+				break
+			}
+		}
+	}
+
+	if targetTable == nil {
+		errorResponse(w, http.StatusBadRequest, "could not locate specified dining table")
+		return
+	}
+
+	// Verify table belongs to staff's restaurant
+	if targetTable.RestaurantID != claims.RestaurantID && !claims.IsPlatform {
+		errorResponse(w, http.StatusForbidden, "table belongs to another restaurant tenant")
+		return
+	}
+
+	name := strings.TrimSpace(req.CustomerName)
+	if name == "" {
+		name = "Walk-in Guest"
+	}
+	guestCount := req.GuestCount
+	if guestCount <= 0 {
+		guestCount = 2
+	}
+
+	sess, _, err := h.sessionService.StartSession(
+		r.Context(),
+		targetTable.TableToken,
+		"STAFF_TERMINAL",
+		name,
+		strings.TrimSpace(req.CustomerPhone),
+		strings.TrimSpace(req.VehicleNumber),
+		guestCount,
+		"STAFF_POS_"+claims.StaffID.String(),
+	)
+	if err != nil {
+		errorResponse(w, http.StatusBadRequest, "failed to start session: "+err.Error())
+		return
+	}
+
+	// Auto-verify since staff is physically seating the walk-in guests
+	now := time.Now()
+	sess.Status = session.StateOpenVerified
+	sess.VerifiedAt = &now
+	sess.VerifiedByStaffID = &claims.StaffID
+	_ = h.repo.UpdateSession(r.Context(), sess)
+
+	jsonResponse(w, http.StatusCreated, sess)
 }
 
 type PendingOrderResponse struct {
