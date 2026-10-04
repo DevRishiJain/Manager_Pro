@@ -71,6 +71,7 @@ type Restaurant struct {
 	ID                    uuid.UUID   `json:"id"`
 	Name                  string      `json:"name"`
 	Slug                  string      `json:"slug,omitempty"`
+	Theme                 string      `json:"theme,omitempty"`
 	VenueType             VenueType   `json:"venue_type,omitempty"`
 	GSTIN                 string      `json:"gstin"`
 	CommissionRateBps     int64       `json:"commission_rate_bps"` // Default 100 = 1.00%

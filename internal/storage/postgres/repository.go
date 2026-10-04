@@ -1020,11 +1020,18 @@ func (r *PostgresRepository) ListSettlements(ctx context.Context, restaurantID u
 func (r *PostgresRepository) CreateRestaurant(ctx context.Context, rest *restaurant.Restaurant) error {
 	_ = r.mem.CreateRestaurant(ctx, rest)
 	if r.pool != nil {
+		theme := rest.Theme
+		if theme == "" {
+			theme = "gold"
+		}
 		_, _ = r.pool.Exec(ctx, `
-			INSERT INTO restaurants (id, name, gstin, commission_rate_bps, settlement_bank_details, status, timezone, created_at, updated_at)
-			VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9)
-			ON CONFLICT (id) DO NOTHING;
-		`, rest.ID, rest.Name, rest.GSTIN, rest.CommissionRateBps, rest.SettlementBankDetails, rest.Status, rest.Timezone, rest.CreatedAt, rest.UpdatedAt)
+			INSERT INTO restaurants (id, name, slug, theme, gstin, commission_rate_bps, settlement_bank_details, status, timezone, created_at, updated_at)
+			VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11)
+			ON CONFLICT (id) DO UPDATE SET
+				slug = EXCLUDED.slug,
+				theme = EXCLUDED.theme,
+				updated_at = EXCLUDED.updated_at;
+		`, rest.ID, rest.Name, rest.Slug, theme, rest.GSTIN, rest.CommissionRateBps, rest.SettlementBankDetails, rest.Status, rest.Timezone, rest.CreatedAt, rest.UpdatedAt)
 	}
 	return nil
 }
@@ -1033,10 +1040,10 @@ func (r *PostgresRepository) GetRestaurantByID(ctx context.Context, id uuid.UUID
 	if r.pool != nil {
 		var rest restaurant.Restaurant
 		err := r.pool.QueryRow(ctx, `
-			SELECT id, name, COALESCE(slug, ''), gstin, commission_rate_bps, settlement_bank_details, status, timezone, created_at, updated_at
+			SELECT id, name, COALESCE(slug, ''), COALESCE(theme, 'gold'), gstin, commission_rate_bps, settlement_bank_details, status, timezone, created_at, updated_at
 			FROM restaurants
 			WHERE id = $1;
-		`, id).Scan(&rest.ID, &rest.Name, &rest.Slug, &rest.GSTIN, &rest.CommissionRateBps, &rest.SettlementBankDetails, &rest.Status, &rest.Timezone, &rest.CreatedAt, &rest.UpdatedAt)
+		`, id).Scan(&rest.ID, &rest.Name, &rest.Slug, &rest.Theme, &rest.GSTIN, &rest.CommissionRateBps, &rest.SettlementBankDetails, &rest.Status, &rest.Timezone, &rest.CreatedAt, &rest.UpdatedAt)
 		if err == nil {
 			return &rest, nil
 		}
@@ -1052,7 +1059,7 @@ func (r *PostgresRepository) GetRestaurantBySlug(ctx context.Context, slug strin
 	if r.pool != nil {
 		var rest restaurant.Restaurant
 		err := r.pool.QueryRow(ctx, `
-			SELECT id, name, COALESCE(slug, ''), gstin, commission_rate_bps, settlement_bank_details, status, timezone, created_at, updated_at
+			SELECT id, name, COALESCE(slug, ''), COALESCE(theme, 'gold'), gstin, commission_rate_bps, settlement_bank_details, status, timezone, created_at, updated_at
 			FROM restaurants
 			WHERE LOWER(slug) = $1
 			   OR LOWER(slug) = $2
@@ -1060,7 +1067,7 @@ func (r *PostgresRepository) GetRestaurantBySlug(ctx context.Context, slug strin
 			   OR LOWER(REPLACE(TRIM(name), ' ', '-')) = $1
 			   OR LOWER(REPLACE(TRIM(name), ' ', '')) = $2
 			LIMIT 1;
-		`, target, targetAlpha).Scan(&rest.ID, &rest.Name, &rest.Slug, &rest.GSTIN, &rest.CommissionRateBps, &rest.SettlementBankDetails, &rest.Status, &rest.Timezone, &rest.CreatedAt, &rest.UpdatedAt)
+		`, target, targetAlpha).Scan(&rest.ID, &rest.Name, &rest.Slug, &rest.Theme, &rest.GSTIN, &rest.CommissionRateBps, &rest.SettlementBankDetails, &rest.Status, &rest.Timezone, &rest.CreatedAt, &rest.UpdatedAt)
 		if err == nil {
 			return &rest, nil
 		}

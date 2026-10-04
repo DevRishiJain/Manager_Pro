@@ -1287,6 +1287,7 @@ func (h *APIHandler) CheckHandleAvailability(w http.ResponseWriter, r *http.Requ
 			"id":         rest.ID,
 			"name":       rest.Name,
 			"slug":       rest.Slug,
+			"theme":      rest.Theme,
 			"venue_type": rest.VenueType,
 			"status":     rest.Status,
 		}
@@ -1322,6 +1323,7 @@ func (h *APIHandler) LookupRestaurantPublic(w http.ResponseWriter, r *http.Reque
 		"id":         rest.ID,
 		"name":       rest.Name,
 		"slug":       rest.Slug,
+		"theme":      rest.Theme,
 		"venue_type": rest.VenueType,
 		"status":     rest.Status,
 	})
@@ -2161,6 +2163,7 @@ type OnboardRestaurantRequest struct {
 	RestaurantName string `json:"restaurant_name"`
 	VenueType      string `json:"venue_type"`
 	Slug           string `json:"slug"`
+	Theme          string `json:"theme"`
 	LegalName      string `json:"legal_name"`
 	GSTIN          string `json:"gstin"`
 	Phone          string `json:"phone"`
@@ -2245,9 +2248,21 @@ func (h *APIHandler) OnboardRestaurant(w http.ResponseWriter, r *http.Request) {
 		venueType = restaurant.VenueTypeFineDine
 	}
 
+	slug := strings.ToLower(strings.TrimSpace(req.Slug))
+	slug = strings.TrimPrefix(slug, "@")
+	if slug == "" {
+		slug = strings.ToLower(strings.ReplaceAll(name, " ", "-"))
+	}
+	theme := strings.ToLower(strings.TrimSpace(req.Theme))
+	if theme == "" {
+		theme = "gold"
+	}
+
 	rest := &restaurant.Restaurant{
 		ID:                    restID,
 		Name:                  name,
+		Slug:                  slug,
+		Theme:                 theme,
 		VenueType:             venueType,
 		GSTIN:                 gstin,
 		CommissionRateBps:     100,

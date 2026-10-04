@@ -6,6 +6,7 @@ bin/
 *.so
 *.dylib
 dist/
+server
 
 # Test and coverage artifacts
 *.out
