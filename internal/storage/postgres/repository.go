@@ -29,6 +29,9 @@ type PostgresRepository struct {
 }
 
 func NewPostgresRepository(pool *pgxpool.Pool) *PostgresRepository {
+	if pool != nil {
+		_, _ = pool.Exec(context.Background(), "ALTER TABLE tables ADD COLUMN IF NOT EXISTS capacity INT NOT NULL DEFAULT 4;")
+	}
 	return &PostgresRepository{
 		pool: pool,
 		mem:  memory.NewMemoryRepository(),
@@ -1086,11 +1089,15 @@ func (r *PostgresRepository) UpdateRestaurant(ctx context.Context, rest *restaur
 func (r *PostgresRepository) CreateTable(ctx context.Context, t *restaurant.Table) error {
 	_ = r.mem.CreateTable(ctx, t)
 	if r.pool != nil {
+		cap := t.Capacity
+		if cap <= 0 {
+			cap = 4
+		}
 		_, _ = r.pool.Exec(ctx, `
-			INSERT INTO tables (id, restaurant_id, table_number, table_token, is_active, created_at, updated_at)
-			VALUES ($1, $2, $3, $4, $5, $6, $7)
+			INSERT INTO tables (id, restaurant_id, table_number, table_token, capacity, is_active, created_at, updated_at)
+			VALUES ($1, $2, $3, $4, $5, $6, $7, $8)
 			ON CONFLICT (id) DO NOTHING;
-		`, t.ID, t.RestaurantID, t.TableNumber, t.TableToken, t.IsActive, t.CreatedAt, t.UpdatedAt)
+		`, t.ID, t.RestaurantID, t.TableNumber, t.TableToken, cap, t.IsActive, t.CreatedAt, t.UpdatedAt)
 	}
 	return nil
 }
@@ -1099,11 +1106,14 @@ func (r *PostgresRepository) GetTableByID(ctx context.Context, id uuid.UUID) (*r
 	if r.pool != nil {
 		var t restaurant.Table
 		err := r.pool.QueryRow(ctx, `
-			SELECT id, restaurant_id, table_number, table_token, is_active, created_at, updated_at
+			SELECT id, restaurant_id, table_number, table_token, COALESCE(capacity, 4), is_active, created_at, updated_at
 			FROM tables
 			WHERE id = $1;
-		`, id).Scan(&t.ID, &t.RestaurantID, &t.TableNumber, &t.TableToken, &t.IsActive, &t.CreatedAt, &t.UpdatedAt)
+		`, id).Scan(&t.ID, &t.RestaurantID, &t.TableNumber, &t.TableToken, &t.Capacity, &t.IsActive, &t.CreatedAt, &t.UpdatedAt)
 		if err == nil {
+			if t.Capacity <= 0 {
+				t.Capacity = 4
+			}
 			return &t, nil
 		}
 	}
@@ -1114,11 +1124,14 @@ func (r *PostgresRepository) GetTableByToken(ctx context.Context, token string) 
 	if r.pool != nil {
 		var t restaurant.Table
 		err := r.pool.QueryRow(ctx, `
-			SELECT id, restaurant_id, table_number, table_token, is_active, created_at, updated_at
+			SELECT id, restaurant_id, table_number, table_token, COALESCE(capacity, 4), is_active, created_at, updated_at
 			FROM tables
 			WHERE table_token = $1 AND is_active = true;
-		`, token).Scan(&t.ID, &t.RestaurantID, &t.TableNumber, &t.TableToken, &t.IsActive, &t.CreatedAt, &t.UpdatedAt)
+		`, token).Scan(&t.ID, &t.RestaurantID, &t.TableNumber, &t.TableToken, &t.Capacity, &t.IsActive, &t.CreatedAt, &t.UpdatedAt)
 		if err == nil {
+			if t.Capacity <= 0 {
+				t.Capacity = 4
+			}
 			return &t, nil
 		}
 	}
@@ -1128,7 +1141,7 @@ func (r *PostgresRepository) GetTableByToken(ctx context.Context, token string) 
 func (r *PostgresRepository) ListTables(ctx context.Context, restaurantID uuid.UUID) ([]restaurant.Table, error) {
 	if r.pool != nil {
 		rows, err := r.pool.Query(ctx, `
-			SELECT id, restaurant_id, table_number, table_token, is_active, created_at, updated_at
+			SELECT id, restaurant_id, table_number, table_token, COALESCE(capacity, 4), is_active, created_at, updated_at
 			FROM tables
 			WHERE restaurant_id = $1
 			ORDER BY table_number ASC;
@@ -1138,7 +1151,10 @@ func (r *PostgresRepository) ListTables(ctx context.Context, restaurantID uuid.U
 			var tables []restaurant.Table
 			for rows.Next() {
 				var t restaurant.Table
-				if err := rows.Scan(&t.ID, &t.RestaurantID, &t.TableNumber, &t.TableToken, &t.IsActive, &t.CreatedAt, &t.UpdatedAt); err == nil {
+				if err := rows.Scan(&t.ID, &t.RestaurantID, &t.TableNumber, &t.TableToken, &t.Capacity, &t.IsActive, &t.CreatedAt, &t.UpdatedAt); err == nil {
+					if t.Capacity <= 0 {
+						t.Capacity = 4
+					}
 					tables = append(tables, t)
 				}
 			}

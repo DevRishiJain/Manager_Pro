@@ -87,6 +87,7 @@ type Table struct {
 	RestaurantID uuid.UUID `json:"restaurant_id"`
 	TableNumber  string    `json:"table_number"`
 	TableToken   string    `json:"table_token"` // Opaque random string encoded in QR
+	Capacity     int       `json:"capacity"`
 	IsActive     bool      `json:"is_active"`
 	CreatedAt    time.Time `json:"created_at"`
 	UpdatedAt    time.Time `json:"updated_at"`

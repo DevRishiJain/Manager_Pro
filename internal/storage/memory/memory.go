@@ -857,11 +857,20 @@ func (m *MemoryRepository) seedDefaultData() {
 		tblID := uuid.New()
 		tblNum := fmt.Sprintf("Table %d", i)
 		token := fmt.Sprintf("TBL-%03d", i)
+		cap := 4
+		if i == 5 || i == 6 {
+			cap = 2
+		} else if i == 7 || i == 8 {
+			cap = 6
+		} else if i == 12 {
+			cap = 8
+		}
 		t := &restaurant.Table{
 			ID:           tblID,
 			RestaurantID: restID,
 			TableNumber:  tblNum,
 			TableToken:   token,
+			Capacity:     cap,
 			IsActive:     true,
 			CreatedAt:    now,
 			UpdatedAt:    now,
@@ -883,6 +892,7 @@ func (m *MemoryRepository) seedDefaultData() {
 		RestaurantID: restID,
 		TableNumber:  "Drive-In Universal",
 		TableToken:   "DRIVE-CAR-01",
+		Capacity:     4,
 		IsActive:     true,
 		CreatedAt:    now,
 		UpdatedAt:    now,
@@ -897,6 +907,7 @@ func (m *MemoryRepository) seedDefaultData() {
 		RestaurantID: restID,
 		TableNumber:  "Room 101",
 		TableToken:   "ROOM-101",
+		Capacity:     2,
 		IsActive:     true,
 		CreatedAt:    now,
 		UpdatedAt:    now,

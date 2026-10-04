@@ -217,6 +217,14 @@ func (h *APIHandler) PlaceOrder(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	// If order is placed by authenticated staff (waiter/manager), auto-accept it directly to the kitchen
+	if claims, ok := middleware.GetStaffClaimsFromContext(r.Context()); ok {
+		if acceptedOrd, err := h.orderService.AcceptOrder(r.Context(), ord.ID, claims.StaffID); err == nil && acceptedOrd != nil {
+			ord = acceptedOrd
+			firstOTP = nil
+		}
+	}
+
 	resp := map[string]interface{}{
 		"order": ord,
 	}
@@ -536,6 +544,21 @@ func (h *APIHandler) StaffConfirmPayment(w http.ResponseWriter, r *http.Request)
 		return
 	}
 
+	// When bill is settled, close all remaining active items:
+	// - If not cooking (PLACED_UNVERIFIED, PLACED_VERIFIED, ACCEPTED): cancel the order and notify kitchen
+	// - If cooking (PREPARING) or prepared (READY): force-close and record as food wastage, notify kitchen
+	orders, _ := h.orderService.GetOrdersBySessionID(r.Context(), sessionID)
+	for _, ord := range orders {
+		switch ord.Status {
+		case order.StatePlacedUnverified, order.StatePlacedVerified, order.StateAccepted:
+			_, _ = h.orderService.CancelOrder(r.Context(), ord.ID, claims.StaffID, audit.ActorTypeStaff, "Bill settled: cancelled before kitchen cooking")
+		case order.StatePreparing:
+			_, _ = h.orderService.CancelOrder(r.Context(), ord.ID, claims.StaffID, audit.ActorTypeStaff, "Bill settled: force-closed active cooking item (food wastage)")
+		case order.StateReady:
+			_, _ = h.orderService.CancelOrder(r.Context(), ord.ID, claims.StaffID, audit.ActorTypeStaff, "Bill settled: force-closed prepared item (food wastage)")
+		}
+	}
+
 	jsonResponse(w, http.StatusOK, p)
 }
 
@@ -644,9 +667,15 @@ func (h *APIHandler) GetTableDashboard(w http.ResponseWriter, r *http.Request) {
 			}
 		}
 
+		cap := t.Capacity
+		if cap <= 0 {
+			cap = 4
+		}
+
 		entry := map[string]interface{}{
 			"table_id":                t.ID,
 			"table_number":            t.TableNumber,
+			"capacity":                cap,
 			"is_occupied":             isOccupied,
 			"active_session_id":       sessID,
 			"session_status":          sessStatus,
@@ -1489,6 +1518,11 @@ func (h *APIHandler) StaffStartSession(w http.ResponseWriter, r *http.Request) {
 	guestCount := req.GuestCount
 	if guestCount <= 0 {
 		guestCount = 2
+	}
+
+	if targetTable.Capacity > 0 && guestCount > targetTable.Capacity {
+		errorResponse(w, http.StatusBadRequest, fmt.Sprintf("guest count (%d) exceeds table seating capacity (%d seats)", guestCount, targetTable.Capacity))
+		return
 	}
 
 	sess, _, err := h.sessionService.StartSession(
@@ -2602,6 +2636,7 @@ func (h *APIHandler) CreateTable(w http.ResponseWriter, r *http.Request) {
 		RestaurantID: claims.RestaurantID,
 		TableNumber:  strings.TrimSpace(req.TableNumber),
 		TableToken:   token,
+		Capacity:     req.Capacity,
 		IsActive:     true,
 		CreatedAt:    now,
 		UpdatedAt:    now,

@@ -64,6 +64,7 @@ var AllowedOrderTransitions = map[State][]State{
 	},
 	StateReady: {
 		StateServed,
+		StateCancelled,
 	},
 	StateServed:    {},
 	StateRejected:  {},

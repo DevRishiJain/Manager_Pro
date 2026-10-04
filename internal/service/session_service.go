@@ -25,6 +25,7 @@ var (
 	ErrSingleDevicePolicy  = errors.New("restaurant policy allows only the original device to order at this table")
 	ErrFirstOrderOTPMiss   = errors.New("invalid first-order verification OTP")
 	ErrSessionNotOpen      = errors.New("session is not in an open state")
+	ErrCapacityExceeded    = errors.New("guest count exceeds table seating capacity")
 )
 
 type SessionService struct {
@@ -43,6 +44,10 @@ func (s *SessionService) StartSession(ctx context.Context, tableToken, deviceTok
 	table, err := s.repo.GetTableByToken(ctx, tableToken)
 	if err != nil || !table.IsActive {
 		return nil, false, ErrInvalidTableQR
+	}
+
+	if table.Capacity > 0 && guestCount > table.Capacity {
+		return nil, false, fmt.Errorf("%w: guest count (%d) exceeds table capacity (%d seats)", ErrCapacityExceeded, guestCount, table.Capacity)
 	}
 
 	settings, err := s.repo.GetSettings(ctx, table.RestaurantID)

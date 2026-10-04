@@ -10,6 +10,7 @@ import (
 
 	"github.com/devrishijain/table-manager/internal/domain/audit"
 	"github.com/devrishijain/table-manager/internal/domain/exitpass"
+	"github.com/devrishijain/table-manager/internal/domain/expense"
 	"github.com/devrishijain/table-manager/internal/domain/inventory"
 	"github.com/devrishijain/table-manager/internal/domain/money"
 	"github.com/devrishijain/table-manager/internal/domain/order"
@@ -399,7 +400,7 @@ func (s *OrderService) CancelOrder(ctx context.Context, orderID, actorID uuid.UU
 		stage = order.CancellationPreAcceptance
 	case order.StateAccepted:
 		stage = order.CancellationPostAcceptancePrePrep
-	case order.StatePreparing:
+	case order.StatePreparing, order.StateReady:
 		stage = order.CancellationPostPrepStart
 	default:
 		return nil, ErrOrderCannotBeMutated
@@ -422,6 +423,31 @@ func (s *OrderService) CancelOrder(ctx context.Context, orderID, actorID uuid.UU
 			_ = s.repo.UpdateSession(ctx, sess)
 		}
 		s.restoreOrderIngredients(ctx, ord)
+	} else {
+		// POST_PREP_START: Active cooking or prepared food was force-closed/cancelled!
+		// Automatically log as food wastage in the financial expense ledger
+		wastageReason := reason
+		if wastageReason == "" {
+			wastageReason = "Kitchen food wastage: order cancelled during cooking or after preparation"
+		}
+		if ord.Total.AmountMinorUnits > 0 {
+			wastageExpense := &expense.Expense{
+				ID:              uuid.New(),
+				RestaurantID:    ord.RestaurantID,
+				Type:            expense.TypeVariable,
+				Category:        expense.CategoryFoodWastage,
+				Title:           fmt.Sprintf("Wastage: Order #%d (Force-closed)", ord.SequenceNumber),
+				Amount:          ord.Total,
+				PaidVia:         expense.PaidViaInventoryWriteOff,
+				VendorName:      "Kitchen Wastage",
+				ExpenseDate:     now,
+				Notes:           wastageReason,
+				IsStockPurchase: false,
+				CreatedAt:       now,
+				UpdatedAt:       now,
+			}
+			_ = s.repo.CreateExpense(ctx, wastageExpense)
+		}
 	}
 
 	orderBytes, _ := json.Marshal(ord)
@@ -434,6 +460,16 @@ func (s *OrderService) CancelOrder(ctx context.Context, orderID, actorID uuid.UU
 		Action:       "ORDER_CANCELLED",
 		AfterState:   orderBytes,
 		Metadata:     fmt.Appendf(nil, `{"reason":"%s","stage":"%s"}`, reason, stage),
+		CreatedAt:    now,
+	})
+
+	_ = s.repo.StoreOutboxEvent(ctx, &storage.OutboxEvent{
+		ID:           uuid.New(),
+		RestaurantID: ord.RestaurantID,
+		EventType:    "ORDER_CANCELLED",
+		AggregateID:  ord.ID.String(),
+		Payload:      orderBytes,
+		Status:       storage.OutboxStatusPending,
 		CreatedAt:    now,
 	})
 
