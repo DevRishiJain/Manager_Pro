@@ -1,6 +1,7 @@
 package handlers
 
 import (
+	"context"
 	"encoding/json"
 	"fmt"
 	"io"
@@ -578,12 +579,25 @@ func (h *APIHandler) ForceCloseSession(w http.ResponseWriter, r *http.Request) {
 	jsonResponse(w, http.StatusOK, map[string]string{"status": "FORCE_CLOSED"})
 }
 
+func (h *APIHandler) resolveRestaurantID(ctx context.Context, param string) uuid.UUID {
+	trimmed := strings.TrimSpace(param)
+	if trimmed == "" {
+		return uuid.Nil
+	}
+	if parsed, err := uuid.Parse(trimmed); err == nil && parsed != uuid.Nil {
+		return parsed
+	}
+	cleanSlug := strings.ToLower(strings.TrimPrefix(trimmed, "@"))
+	if rest, err := h.repo.GetRestaurantBySlug(ctx, cleanSlug); err == nil && rest != nil {
+		return rest.ID
+	}
+	return uuid.Nil
+}
+
 func (h *APIHandler) GetTableDashboard(w http.ResponseWriter, r *http.Request) {
 	var restaurantID uuid.UUID
 	if restParam := r.URL.Query().Get("restaurant_id"); restParam != "" {
-		if parsed, err := uuid.Parse(restParam); err == nil {
-			restaurantID = parsed
-		}
+		restaurantID = h.resolveRestaurantID(r.Context(), restParam)
 	}
 	if restaurantID == uuid.Nil {
 		if claims, ok := middleware.GetStaffClaimsFromContext(r.Context()); ok && claims.RestaurantID != uuid.Nil {
@@ -707,9 +721,7 @@ func (h *APIHandler) StaffVerifyExit(w http.ResponseWriter, r *http.Request) {
 func (h *APIHandler) GetKitchenQueue(w http.ResponseWriter, r *http.Request) {
 	var restaurantID uuid.UUID
 	if restParam := r.URL.Query().Get("restaurant_id"); restParam != "" {
-		if parsed, err := uuid.Parse(restParam); err == nil {
-			restaurantID = parsed
-		}
+		restaurantID = h.resolveRestaurantID(r.Context(), restParam)
 	}
 	if restaurantID == uuid.Nil {
 		if claims, ok := middleware.GetStaffClaimsFromContext(r.Context()); ok && claims.RestaurantID != uuid.Nil {
@@ -1556,9 +1568,7 @@ func (h *APIHandler) GetPendingOrders(w http.ResponseWriter, r *http.Request) {
 func (h *APIHandler) GetRestaurantOrders(w http.ResponseWriter, r *http.Request) {
 	var restaurantID uuid.UUID
 	if restParam := r.URL.Query().Get("restaurant_id"); restParam != "" {
-		if parsed, err := uuid.Parse(restParam); err == nil {
-			restaurantID = parsed
-		}
+		restaurantID = h.resolveRestaurantID(r.Context(), restParam)
 	}
 	if restaurantID == uuid.Nil {
 		if claims, ok := middleware.GetStaffClaimsFromContext(r.Context()); ok && claims.RestaurantID != uuid.Nil {
