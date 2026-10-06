@@ -1571,6 +1571,18 @@ func (r *PostgresRepository) ReplayDeadLetterOutbox(ctx context.Context, id uuid
 	return r.mem.ReplayDeadLetterOutbox(ctx, id)
 }
 
+func (r *PostgresRepository) PrunePublishedOutbox(ctx context.Context, maxAge time.Duration) (int64, error) {
+	if maxAge <= 0 {
+		maxAge = 7 * 24 * time.Hour
+	}
+	cutoff := time.Now().Add(-maxAge)
+	res, err := r.pool.Exec(ctx, "DELETE FROM event_outbox WHERE status = 'PUBLISHED' AND (dispatched_at < $1 OR (dispatched_at IS NULL AND created_at < $1))", cutoff)
+	if err != nil {
+		return r.mem.PrunePublishedOutbox(ctx, maxAge)
+	}
+	return res.RowsAffected(), nil
+}
+
 // ---------------- Webhook Idempotency ----------------
 
 func (r *PostgresRepository) RecordWebhookEvent(ctx context.Context, gateway, eventID string) (bool, error) {

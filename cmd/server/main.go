@@ -53,7 +53,12 @@ func main() {
 		}
 
 		pgxCfg.MaxConns = int32(cfg.Database.MaxOpenConns)
-		pgxCfg.MinConns = int32(cfg.Database.MaxIdleConns)
+		if pgxCfg.MaxConns < 25 {
+			pgxCfg.MaxConns = 50
+		}
+		pgxCfg.MinConns = 10
+		pgxCfg.MaxConnIdleTime = 5 * time.Minute
+		pgxCfg.MaxConnLifetime = 30 * time.Minute
 		pgxCfg.AfterConnect = func(ctx context.Context, conn *pgx.Conn) error {
 			_, err := conn.Exec(ctx, "SET app.is_platform_admin = 'true'")
 			return err

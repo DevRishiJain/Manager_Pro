@@ -56,9 +56,14 @@ func (w *Worker) SetBaseBackoff(b time.Duration) {
 
 func (w *Worker) Start(ctx context.Context) {
 	ticker := time.NewTicker(30 * time.Second)
+	pruneTicker := time.NewTicker(24 * time.Hour)
 	defer ticker.Stop()
+	defer pruneTicker.Stop()
 
-	w.logger.Info("Background worker started: running outbox and expiry sweeps")
+	w.logger.Info("Background worker started: running outbox, expiry sweeps, and retention pruning")
+
+	// Run initial outbox retention prune on startup
+	w.pruneOutbox(ctx)
 
 	for {
 		select {
@@ -70,7 +75,18 @@ func (w *Worker) Start(ctx context.Context) {
 		case <-ticker.C:
 			w.processOutbox(ctx)
 			w.sweepExpiredSessions(ctx)
+		case <-pruneTicker.C:
+			w.pruneOutbox(ctx)
 		}
+	}
+}
+
+func (w *Worker) pruneOutbox(ctx context.Context) {
+	pruned, err := w.repo.PrunePublishedOutbox(ctx, 7*24*time.Hour)
+	if err != nil {
+		w.logger.Error("Failed to prune published outbox events", "error", err)
+	} else if pruned > 0 {
+		w.logger.Info("Pruned published outbox events", "count", pruned)
 	}
 }
 

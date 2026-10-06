@@ -146,6 +146,7 @@ type Repository interface {
 	MarkOutboxPublished(ctx context.Context, id uuid.UUID) error
 	MarkOutboxFailed(ctx context.Context, id uuid.UUID, lastErr string, backoff time.Duration, maxRetries int) error
 	ReplayDeadLetterOutbox(ctx context.Context, id uuid.UUID) error
+	PrunePublishedOutbox(ctx context.Context, maxAge time.Duration) (int64, error)
 
 	// Webhook Idempotency
 	RecordWebhookEvent(ctx context.Context, gateway, eventID string) (bool, error) // returns true if newly inserted, false if duplicate

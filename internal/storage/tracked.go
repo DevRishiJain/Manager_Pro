@@ -395,6 +395,11 @@ func (tr *TrackedRepository) ReplayDeadLetterOutbox(ctx context.Context, id uuid
 	return tr.underlying.ReplayDeadLetterOutbox(ctx, id)
 }
 
+func (tr *TrackedRepository) PrunePublishedOutbox(ctx context.Context, maxAge time.Duration) (int64, error) {
+	RecordQuery(ctx)
+	return tr.underlying.PrunePublishedOutbox(ctx, maxAge)
+}
+
 func (tr *TrackedRepository) RecordWebhookEvent(ctx context.Context, gateway, eventID string) (bool, error) {
 	RecordQuery(ctx)
 	return tr.underlying.RecordWebhookEvent(ctx, gateway, eventID)

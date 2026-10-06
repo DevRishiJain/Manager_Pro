@@ -1395,6 +1395,31 @@ func (m *MemoryRepository) ReplayDeadLetterOutbox(ctx context.Context, id uuid.U
 	return nil
 }
 
+func (m *MemoryRepository) PrunePublishedOutbox(ctx context.Context, maxAge time.Duration) (int64, error) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+
+	if maxAge <= 0 {
+		maxAge = 7 * 24 * time.Hour
+	}
+	cutoff := time.Now().Add(-maxAge)
+	var count int64 = 0
+
+	for id, e := range m.outboxEvents {
+		if e.Status == storage.OutboxStatusPublished {
+			ts := e.CreatedAt
+			if e.PublishedAt != nil {
+				ts = *e.PublishedAt
+			}
+			if ts.Before(cutoff) {
+				delete(m.outboxEvents, id)
+				count++
+			}
+		}
+	}
+	return count, nil
+}
+
 func (m *MemoryRepository) RecordWebhookEvent(ctx context.Context, gateway, eventID string) (bool, error) {
 	m.mu.Lock()
 	defer m.mu.Unlock()
