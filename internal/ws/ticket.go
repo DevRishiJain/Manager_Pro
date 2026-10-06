@@ -109,6 +109,12 @@ func (tm *TicketManager) IssueStaffTicket(restaurantID, staffID uuid.UUID, role 
 			fmt.Sprintf("restaurant:%s:dashboard", restStr),
 			fmt.Sprintf("restaurant:%s:manager", restStr),
 		}
+	case "SUPER_ADMIN":
+		rooms = []string{
+			"platform:superadmin",
+			fmt.Sprintf("restaurant:%s:floor", restStr),
+			fmt.Sprintf("restaurant:%s:dashboard", restStr),
+		}
 	default:
 		rooms = []string{
 			fmt.Sprintf("restaurant:%s:floor", restStr),
