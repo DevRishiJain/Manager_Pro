@@ -41,8 +41,10 @@ func NewRouter(handler *handlers.APIHandler, repo storage.Repository, jwtSecret 
 	rateLimiter := middleware.NewRateLimiter(120, 1*time.Minute)
 	r.Use(rateLimiter.Middleware)
 
+	r.Use(middleware.ETagMiddleware)
 	idempotencyMgr := middleware.NewIdempotencyManager()
 	r.Use(idempotencyMgr.Middleware())
+	r.Use(middleware.SubscriptionGateMiddleware(repo, jwtSecret))
 
 	// Metrics endpoint
 	r.Get("/metrics", middleware.MetricsHandler(middleware.GlobalMetrics))
@@ -110,12 +112,31 @@ func NewRouter(handler *handlers.APIHandler, repo storage.Repository, jwtSecret 
 			sr.Post("/staff/sessions/{id}/force-close", handler.ForceCloseSession)
 			sr.Post("/staff/sessions/{id}/assistance/dismiss", handler.DismissAssistance)
 			sr.Get("/staff/dashboard/tables", handler.GetTableDashboard)
+			sr.Get("/restaurant/subscription", handler.GetSubscription)
+			sr.Post("/restaurant/subscription/renew", handler.RenewSubscription)
+		})
+
+		// Franchise Governance routes
+		api.Group(func(fr chi.Router) {
+			fr.Use(middleware.StaffAuth(jwtSecret))
+			fr.Use(middleware.RequireRole("FRANCHISE_OWNER", "SUPER_ADMIN"))
+			fr.Get("/franchise/outlets", handler.GetFranchiseOutlets)
+			fr.Get("/franchise/summary", handler.GetFranchiseSummary)
+			fr.Post("/franchise/invite-code", handler.GenerateFranchiseInviteCode)
+			fr.Post("/franchise/outlets/create", handler.CreateFranchiseOutlet)
+		})
+
+		// Store Owner Link Franchise route
+		api.Group(func(lr chi.Router) {
+			lr.Use(middleware.StaffAuth(jwtSecret))
+			lr.Use(middleware.RequireRole("RESTAURANT_OWNER", "RESTAURANT_ADMIN", "FRANCHISE_OWNER", "SUPER_ADMIN"))
+			lr.Post("/restaurant/link-franchise", handler.LinkRestaurantToFranchise)
 		})
 
 		// Kitchen (KDS) routes (§Phase 5.2 Hardening)
 		api.Group(func(kr chi.Router) {
 			kr.Use(middleware.StaffAuth(jwtSecret))
-			kr.Use(middleware.RequireRole("KITCHEN", "WAITER", "MANAGER", "RESTAURANT_ADMIN", "RESTAURANT_OWNER"))
+			kr.Use(middleware.RequireRole("KITCHEN", "WAITER", "MANAGER", "RESTAURANT_ADMIN", "RESTAURANT_OWNER", "FRANCHISE_OWNER", "SUPER_ADMIN"))
 			kr.Get("/kitchen/orders/queue", handler.GetKitchenQueue)
 			kr.Post("/kitchen/orders/{id}/status", handler.UpdateKitchenStatus)
 		})
@@ -136,7 +157,7 @@ func NewRouter(handler *handlers.APIHandler, repo storage.Repository, jwtSecret 
 		// Restaurant Admin / Operations / Analytics / Ledger routes
 		api.Group(func(tr chi.Router) {
 			tr.Use(middleware.StaffAuth(jwtSecret))
-			tr.Use(middleware.RequireRole("RESTAURANT_ADMIN", "RESTAURANT_OWNER", "MANAGER"))
+			tr.Use(middleware.RequireRole("RESTAURANT_ADMIN", "RESTAURANT_OWNER", "FRANCHISE_OWNER", "SUPER_ADMIN", "MANAGER"))
 
 			// Dashboard Overview & Performance (§8A)
 			tr.Get("/restaurant/dashboard/overview", handler.GetDashboardOverview)
@@ -213,6 +234,7 @@ func NewRouter(handler *handlers.APIHandler, repo storage.Repository, jwtSecret 
 			pr.Post("/admin/restaurants/{id}/commission-rate", handler.OverrideCommissionRate)
 			pr.Post("/admin/restaurants/{id}/suspend", handler.SuspendRestaurant)
 			pr.Post("/admin/restaurants/{id}/reactivate", handler.ReactivateRestaurant)
+			pr.Post("/admin/restaurants/{id}/extend-subscription", handler.AdminExtendSubscription)
 			pr.Get("/admin/restaurants/{id}/tables/qr-export", handler.ExportTableQRs)
 		})
 	})

@@ -71,6 +71,14 @@ func (c *StaffClaims) IsSuperAdmin() bool {
 	return c.IsPlatform || c.Role == "SUPER_ADMIN"
 }
 
+// CanAccessMultiOutlets returns true if the claims belong to a role authorized for multi-outlet data viewing.
+func (c *StaffClaims) CanAccessMultiOutlets() bool {
+	if c == nil {
+		return false
+	}
+	return c.IsPlatform || c.Role == "SUPER_ADMIN" || c.Role == "FRANCHISE_OWNER"
+}
+
 type GuardClaims struct {
 	GuardID      uuid.UUID `json:"guard_id"`
 	RestaurantID uuid.UUID `json:"restaurant_id"`

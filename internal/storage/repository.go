@@ -131,6 +131,9 @@ type Repository interface {
 	GetSettings(ctx context.Context, restaurantID uuid.UUID) (*restaurant.RestaurantSettings, error)
 	UpdateSettings(ctx context.Context, s *restaurant.RestaurantSettings) error
 
+	GetSubscription(ctx context.Context, restaurantID uuid.UUID) (*restaurant.Restaurant, error)
+	RenewSubscription(ctx context.Context, restaurantID uuid.UUID, days int) (*restaurant.Restaurant, error)
+
 	GetOnboarding(ctx context.Context, restaurantID uuid.UUID) (*restaurant.RestaurantOnboarding, error)
 	UpdateOnboarding(ctx context.Context, o *restaurant.RestaurantOnboarding) error
 

@@ -1023,6 +1023,7 @@ func (m *MemoryRepository) seedDefaultData() {
 		{"EMP-MGR-001", "Priya Nair", "priya.manager@goldenspoon.com", restaurant.RoleManager},
 		{"EMP-ADM-001", "Vikram Malhotra", "owner@goldenspoon.com", restaurant.RoleRestaurantAdmin},
 		{"EMP-GRD-001", "Ramesh Singh", "guard@goldenspoon.com", restaurant.RoleGuard},
+		{"EMP-SUP-001", "Platform Super Admin", "superadmin@tableos.com", restaurant.RoleSuperAdmin},
 	}
 
 	for _, st := range staffMembers {
@@ -1820,4 +1821,49 @@ func (m *MemoryRepository) MarkPasswordResetTokenUsed(ctx context.Context, id uu
 	t.UsedAt = &now
 	return nil
 }
+
+// ---------------- Subscriptions ----------------
+
+func (m *MemoryRepository) GetSubscription(ctx context.Context, restaurantID uuid.UUID) (*restaurant.Restaurant, error) {
+	m.mu.RLock()
+	defer m.mu.RUnlock()
+	rest, ok := m.restaurants[restaurantID]
+	if !ok {
+		return nil, ErrNotFound
+	}
+	cp := *rest
+	if cp.SubscriptionPlan == "" {
+		cp.SubscriptionPlan = "PRO"
+	}
+	if cp.SubscriptionStatus == "" {
+		cp.SubscriptionStatus = "ACTIVE"
+	}
+	if cp.SubscriptionEndAt.IsZero() {
+		cp.SubscriptionEndAt = time.Now().Add(30 * 24 * time.Hour)
+	}
+	return &cp, nil
+}
+
+func (m *MemoryRepository) RenewSubscription(ctx context.Context, restaurantID uuid.UUID, days int) (*restaurant.Restaurant, error) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	rest, ok := m.restaurants[restaurantID]
+	if !ok {
+		return nil, ErrNotFound
+	}
+	if days <= 0 {
+		days = 30
+	}
+	now := time.Now().UTC()
+	if rest.SubscriptionEndAt.Before(now) {
+		rest.SubscriptionEndAt = now.Add(time.Duration(days) * 24 * time.Hour)
+	} else {
+		rest.SubscriptionEndAt = rest.SubscriptionEndAt.Add(time.Duration(days) * 24 * time.Hour)
+	}
+	rest.SubscriptionStatus = "ACTIVE"
+	rest.UpdatedAt = now
+	cp := *rest
+	return &cp, nil
+}
+
 

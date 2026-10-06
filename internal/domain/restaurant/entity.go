@@ -78,8 +78,33 @@ type Restaurant struct {
 	SettlementBankDetails string      `json:"settlement_bank_details"`
 	Status                Status      `json:"status"`
 	Timezone              string      `json:"timezone"` // e.g. "Asia/Kolkata"
+	SubscriptionPlan      string      `json:"subscription_plan"`   // e.g. "PRO", "BASIC"
+	SubscriptionStatus    string      `json:"subscription_status"` // e.g. "ACTIVE", "EXPIRED", "SUSPENDED"
+	SubscriptionEndAt     time.Time   `json:"subscription_end_at"`
 	CreatedAt             time.Time   `json:"created_at"`
 	UpdatedAt             time.Time   `json:"updated_at"`
+}
+
+func (r *Restaurant) DaysRemaining() int {
+	if r.SubscriptionEndAt.IsZero() {
+		return 0
+	}
+	diff := time.Until(r.SubscriptionEndAt)
+	days := int(diff.Hours() / 24)
+	if days < 0 {
+		return 0
+	}
+	return days
+}
+
+func (r *Restaurant) IsSubscriptionActive() bool {
+	if r.SubscriptionStatus == "SUSPENDED" || r.SubscriptionStatus == "EXPIRED" {
+		return false
+	}
+	if r.SubscriptionEndAt.IsZero() {
+		return true // Default active if unassigned
+	}
+	return time.Now().Before(r.SubscriptionEndAt)
 }
 
 type Table struct {

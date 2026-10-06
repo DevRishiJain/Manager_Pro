@@ -31,6 +31,11 @@ type PostgresRepository struct {
 func NewPostgresRepository(pool *pgxpool.Pool) *PostgresRepository {
 	if pool != nil {
 		_, _ = pool.Exec(context.Background(), "ALTER TABLE tables ADD COLUMN IF NOT EXISTS capacity INT NOT NULL DEFAULT 4;")
+		_, _ = pool.Exec(context.Background(), `
+			ALTER TABLE restaurants ADD COLUMN IF NOT EXISTS subscription_plan VARCHAR(50) NOT NULL DEFAULT 'PRO';
+			ALTER TABLE restaurants ADD COLUMN IF NOT EXISTS subscription_status VARCHAR(50) NOT NULL DEFAULT 'ACTIVE';
+			ALTER TABLE restaurants ADD COLUMN IF NOT EXISTS subscription_end_at TIMESTAMPTZ NOT NULL DEFAULT (NOW() + INTERVAL '30 days');
+		`)
 	}
 	return &PostgresRepository{
 		pool: pool,
@@ -1095,10 +1100,12 @@ func (r *PostgresRepository) GetRestaurantByID(ctx context.Context, id uuid.UUID
 	if r.pool != nil {
 		var rest restaurant.Restaurant
 		err := r.pool.QueryRow(ctx, `
-			SELECT id, name, COALESCE(slug, ''), COALESCE(theme, 'gold'), gstin, commission_rate_bps, settlement_bank_details, status, timezone, created_at, updated_at
+			SELECT id, name, COALESCE(slug, ''), COALESCE(theme, 'gold'), gstin, commission_rate_bps, settlement_bank_details, status, timezone,
+			       COALESCE(subscription_plan, 'PRO'), COALESCE(subscription_status, 'ACTIVE'), COALESCE(subscription_end_at, NOW() + INTERVAL '30 days'),
+			       created_at, updated_at
 			FROM restaurants
 			WHERE id = $1;
-		`, id).Scan(&rest.ID, &rest.Name, &rest.Slug, &rest.Theme, &rest.GSTIN, &rest.CommissionRateBps, &rest.SettlementBankDetails, &rest.Status, &rest.Timezone, &rest.CreatedAt, &rest.UpdatedAt)
+		`, id).Scan(&rest.ID, &rest.Name, &rest.Slug, &rest.Theme, &rest.GSTIN, &rest.CommissionRateBps, &rest.SettlementBankDetails, &rest.Status, &rest.Timezone, &rest.SubscriptionPlan, &rest.SubscriptionStatus, &rest.SubscriptionEndAt, &rest.CreatedAt, &rest.UpdatedAt)
 		if err == nil {
 			return &rest, nil
 		}
@@ -1114,7 +1121,9 @@ func (r *PostgresRepository) GetRestaurantBySlug(ctx context.Context, slug strin
 	if r.pool != nil {
 		var rest restaurant.Restaurant
 		err := r.pool.QueryRow(ctx, `
-			SELECT id, name, COALESCE(slug, ''), COALESCE(theme, 'gold'), gstin, commission_rate_bps, settlement_bank_details, status, timezone, created_at, updated_at
+			SELECT id, name, COALESCE(slug, ''), COALESCE(theme, 'gold'), gstin, commission_rate_bps, settlement_bank_details, status, timezone,
+			       COALESCE(subscription_plan, 'PRO'), COALESCE(subscription_status, 'ACTIVE'), COALESCE(subscription_end_at, NOW() + INTERVAL '30 days'),
+			       created_at, updated_at
 			FROM restaurants
 			WHERE LOWER(slug) = $1
 			   OR LOWER(slug) = $2
@@ -1122,7 +1131,7 @@ func (r *PostgresRepository) GetRestaurantBySlug(ctx context.Context, slug strin
 			   OR LOWER(REPLACE(TRIM(name), ' ', '-')) = $1
 			   OR LOWER(REPLACE(TRIM(name), ' ', '')) = $2
 			LIMIT 1;
-		`, target, targetAlpha).Scan(&rest.ID, &rest.Name, &rest.Slug, &rest.Theme, &rest.GSTIN, &rest.CommissionRateBps, &rest.SettlementBankDetails, &rest.Status, &rest.Timezone, &rest.CreatedAt, &rest.UpdatedAt)
+		`, target, targetAlpha).Scan(&rest.ID, &rest.Name, &rest.Slug, &rest.Theme, &rest.GSTIN, &rest.CommissionRateBps, &rest.SettlementBankDetails, &rest.Status, &rest.Timezone, &rest.SubscriptionPlan, &rest.SubscriptionStatus, &rest.SubscriptionEndAt, &rest.CreatedAt, &rest.UpdatedAt)
 		if err == nil {
 			return &rest, nil
 		}
@@ -2174,6 +2183,44 @@ func (r *PostgresRepository) MarkPasswordResetTokenUsed(ctx context.Context, id 
 	return nil
 }
 
+// ---------------- Subscriptions ----------------
+
+func (r *PostgresRepository) GetSubscription(ctx context.Context, restaurantID uuid.UUID) (*restaurant.Restaurant, error) {
+	if r.pool != nil {
+		rest, err := r.GetRestaurantByID(ctx, restaurantID)
+		if err == nil && rest != nil {
+			return rest, nil
+		}
+	}
+	return r.mem.GetSubscription(ctx, restaurantID)
+}
+
+func (r *PostgresRepository) RenewSubscription(ctx context.Context, restaurantID uuid.UUID, days int) (*restaurant.Restaurant, error) {
+	_, _ = r.mem.RenewSubscription(ctx, restaurantID, days)
+	if r.pool != nil {
+		if days <= 0 {
+			days = 30
+		}
+		now := time.Now().UTC()
+		_, err := r.pool.Exec(ctx, `
+			UPDATE restaurants
+			SET subscription_end_at = CASE 
+				WHEN subscription_end_at < $1 THEN $1 + ($2 * INTERVAL '1 day') 
+				ELSE subscription_end_at + ($2 * INTERVAL '1 day') 
+			END,
+			subscription_status = 'ACTIVE',
+			updated_at = $1
+			WHERE id = $3;
+		`, now, days, restaurantID)
+		if err != nil {
+			return nil, err
+		}
+		return r.GetRestaurantByID(ctx, restaurantID)
+	}
+	return r.mem.GetSubscription(ctx, restaurantID)
+}
+
 // Ensure interface compliance
 var _ storage.Repository = (*PostgresRepository)(nil)
+
 

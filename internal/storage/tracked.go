@@ -494,3 +494,14 @@ func (tr *TrackedRepository) ListRecipeIngredientsForOrder(ctx context.Context, 
 	RecordQuery(ctx)
 	return tr.underlying.ListRecipeIngredientsForOrder(ctx, orderID)
 }
+
+func (tr *TrackedRepository) GetSubscription(ctx context.Context, restaurantID uuid.UUID) (*restaurant.Restaurant, error) {
+	RecordQuery(ctx)
+	return tr.underlying.GetSubscription(ctx, restaurantID)
+}
+
+func (tr *TrackedRepository) RenewSubscription(ctx context.Context, restaurantID uuid.UUID, days int) (*restaurant.Restaurant, error) {
+	RecordQuery(ctx)
+	return tr.underlying.RenewSubscription(ctx, restaurantID, days)
+}
+

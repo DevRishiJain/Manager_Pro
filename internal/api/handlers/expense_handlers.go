@@ -8,6 +8,7 @@ import (
 
 	"github.com/devrishijain/table-manager/internal/api/middleware"
 	"github.com/devrishijain/table-manager/internal/domain/expense"
+	"github.com/devrishijain/table-manager/internal/domain/restaurant"
 	"github.com/devrishijain/table-manager/internal/service"
 	"github.com/go-chi/chi/v5"
 	"github.com/google/uuid"
@@ -107,19 +108,7 @@ func (h *APIHandler) CreateExpense(w http.ResponseWriter, r *http.Request) {
 }
 
 func (h *APIHandler) ListExpenses(w http.ResponseWriter, r *http.Request) {
-	var restaurantID uuid.UUID
-	if claims, ok := middleware.GetStaffClaimsFromContext(r.Context()); ok && claims.RestaurantID != uuid.Nil {
-		restaurantID = claims.RestaurantID
-	}
-	if restaurantID == uuid.Nil {
-		if restParam := r.URL.Query().Get("restaurant_id"); restParam != "" {
-			restaurantID, _ = uuid.Parse(restParam)
-		}
-	}
-	if restaurantID == uuid.Nil {
-		errorResponse(w, http.StatusBadRequest, "restaurant_id is required")
-		return
-	}
+	restaurantID := h.resolveTargetRestaurantID(r)
 
 	var expType *expense.ExpenseType
 	if tStr := r.URL.Query().Get("type"); tStr != "" {
@@ -145,10 +134,29 @@ func (h *APIHandler) ListExpenses(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 
-	expenses, err := h.getExpenseService().ListExpenses(r.Context(), restaurantID, expType, cat, startDate, endDate)
-	if err != nil {
-		errorResponse(w, http.StatusInternalServerError, err.Error())
-		return
+	var expenses []expense.Expense
+	var err error
+
+	if restaurantID == uuid.Nil {
+		rests, _ := h.repo.ListRestaurants(r.Context())
+		if len(rests) == 0 {
+			if claims, ok := middleware.GetStaffClaimsFromContext(r.Context()); ok {
+				rests = []restaurant.Restaurant{{ID: claims.RestaurantID}}
+			}
+		}
+		expenses = make([]expense.Expense, 0)
+		for _, rest := range rests {
+			eList, eErr := h.getExpenseService().ListExpenses(r.Context(), rest.ID, expType, cat, startDate, endDate)
+			if eErr == nil && len(eList) > 0 {
+				expenses = append(expenses, eList...)
+			}
+		}
+	} else {
+		expenses, err = h.getExpenseService().ListExpenses(r.Context(), restaurantID, expType, cat, startDate, endDate)
+		if err != nil {
+			errorResponse(w, http.StatusInternalServerError, err.Error())
+			return
+		}
 	}
 	if expenses == nil {
 		expenses = []expense.Expense{}

@@ -14,13 +14,10 @@ import (
 )
 
 func (h *APIHandler) ListInventory(w http.ResponseWriter, r *http.Request) {
-	var restaurantID uuid.UUID
-	if claims, ok := middleware.GetStaffClaimsFromContext(r.Context()); ok && claims.RestaurantID != uuid.Nil {
-		restaurantID = claims.RestaurantID
-	}
+	restaurantID := h.resolveTargetRestaurantID(r)
 	if restaurantID == uuid.Nil {
-		if restParam := r.URL.Query().Get("restaurant_id"); restParam != "" {
-			restaurantID, _ = uuid.Parse(restParam)
+		if claims, ok := middleware.GetStaffClaimsFromContext(r.Context()); ok {
+			restaurantID = claims.RestaurantID
 		}
 	}
 	if restaurantID == uuid.Nil {
