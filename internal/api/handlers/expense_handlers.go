@@ -3,6 +3,7 @@ package handlers
 import (
 	"encoding/json"
 	"net/http"
+	"strconv"
 	"time"
 
 	"github.com/devrishijain/table-manager/internal/api/middleware"
@@ -151,6 +152,28 @@ func (h *APIHandler) ListExpenses(w http.ResponseWriter, r *http.Request) {
 	}
 	if expenses == nil {
 		expenses = []expense.Expense{}
+	}
+
+	limit := 100
+	if lStr := r.URL.Query().Get("limit"); lStr != "" {
+		if parsed, err := strconv.Atoi(lStr); err == nil && parsed > 0 {
+			limit = parsed
+		}
+	}
+	offset := 0
+	if oStr := r.URL.Query().Get("offset"); oStr != "" {
+		if parsed, err := strconv.Atoi(oStr); err == nil && parsed >= 0 {
+			offset = parsed
+		}
+	}
+
+	if offset > len(expenses) {
+		expenses = []expense.Expense{}
+	} else {
+		expenses = expenses[offset:]
+		if limit < len(expenses) {
+			expenses = expenses[:limit]
+		}
 	}
 
 	jsonResponse(w, http.StatusOK, expenses)

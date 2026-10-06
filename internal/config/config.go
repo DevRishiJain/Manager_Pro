@@ -39,9 +39,10 @@ type AppConfig struct {
 }
 
 type DatabaseConfig struct {
-	URL          string
-	MaxOpenConns int
-	MaxIdleConns int
+	URL                 string
+	MaxOpenConns        int
+	MaxIdleConns        int
+	AllowMemoryFallback bool
 }
 
 type AuthConfig struct {
@@ -113,9 +114,10 @@ func Load(envFiles ...string) (*Config, error) {
 			BaseURL: getEnv("APP_BASE_URL", "http://localhost:8080"),
 		},
 		Database: DatabaseConfig{
-			URL:          getEnv("DATABASE_URL", "postgres://localhost:5432/table_manager_test?sslmode=disable"),
-			MaxOpenConns: getEnvInt("DB_MAX_OPEN_CONNS", 25),
-			MaxIdleConns: getEnvInt("DB_MAX_IDLE_CONNS", 10),
+			URL:                 getEnv("DATABASE_URL", "postgres://localhost:5432/table_manager_test?sslmode=disable"),
+			MaxOpenConns:        getEnvInt("DB_MAX_OPEN_CONNS", 25),
+			MaxIdleConns:        getEnvInt("DB_MAX_IDLE_CONNS", 10),
+			AllowMemoryFallback: strings.EqualFold(getEnv("ALLOW_MEMORY_FALLBACK", "false"), "true"),
 		},
 		Auth: AuthConfig{
 			JWTSecret:       getEnv("JWT_SECRET", "super-secure-dining-os-jwt-secret-key-32b"),

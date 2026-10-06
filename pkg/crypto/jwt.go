@@ -63,6 +63,14 @@ func (c *StaffClaims) UnmarshalJSON(data []byte) error {
 	return nil
 }
 
+// IsSuperAdmin returns true if the claims belong to a platform administrator or super admin.
+func (c *StaffClaims) IsSuperAdmin() bool {
+	if c == nil {
+		return false
+	}
+	return c.IsPlatform || c.Role == "SUPER_ADMIN"
+}
+
 type GuardClaims struct {
 	GuardID      uuid.UUID `json:"guard_id"`
 	RestaurantID uuid.UUID `json:"restaurant_id"`

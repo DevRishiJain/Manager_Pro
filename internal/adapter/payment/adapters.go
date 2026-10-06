@@ -272,3 +272,91 @@ func (a *POSDirectAPIAdapter) Confirm(ctx context.Context, req payment.PaymentCo
 	}
 	return p, nil
 }
+
+// ---------------- 6. UPIQRAdapter (Counter UPI QR Code) ----------------
+
+type UPIQRAdapter struct{}
+
+func NewUPIQRAdapter() *UPIQRAdapter {
+	return &UPIQRAdapter{}
+}
+
+func (a *UPIQRAdapter) Method() payment.Method {
+	return payment.MethodUPIQR
+}
+
+func (a *UPIQRAdapter) RequiresStaffConfirmation() bool {
+	return true
+}
+
+func (a *UPIQRAdapter) RequiresEvidence() bool {
+	return false
+}
+
+func (a *UPIQRAdapter) Confirm(ctx context.Context, req payment.PaymentConfirmationRequest) (*payment.Payment, error) {
+	if req.ConfirmedByStaffID == nil || *req.ConfirmedByStaffID == uuid.Nil {
+		return nil, ErrMissingStaffActor
+	}
+	payID := req.PaymentID
+	if payID == uuid.Nil {
+		payID = uuid.New()
+	}
+	now := time.Now()
+	return &payment.Payment{
+		ID:                 payID,
+		SessionID:          req.SessionID,
+		RestaurantID:       req.RestaurantID,
+		Method:             payment.MethodUPIQR,
+		Amount:             req.Amount,
+		Status:             payment.StateConfirmed,
+		ConfirmedByStaffID: req.ConfirmedByStaffID,
+		ConfirmedAt:        &now,
+		Version:            1,
+		CreatedAt:          now,
+		UpdatedAt:          now,
+	}, nil
+}
+
+// ---------------- 7. POSCardAdapter (POS Physical Card Terminal) ----------------
+
+type POSCardAdapter struct{}
+
+func NewPOSCardAdapter() *POSCardAdapter {
+	return &POSCardAdapter{}
+}
+
+func (a *POSCardAdapter) Method() payment.Method {
+	return payment.MethodPosCard
+}
+
+func (a *POSCardAdapter) RequiresStaffConfirmation() bool {
+	return true
+}
+
+func (a *POSCardAdapter) RequiresEvidence() bool {
+	return false
+}
+
+func (a *POSCardAdapter) Confirm(ctx context.Context, req payment.PaymentConfirmationRequest) (*payment.Payment, error) {
+	if req.ConfirmedByStaffID == nil || *req.ConfirmedByStaffID == uuid.Nil {
+		return nil, ErrMissingStaffActor
+	}
+	payID := req.PaymentID
+	if payID == uuid.Nil {
+		payID = uuid.New()
+	}
+	now := time.Now()
+	return &payment.Payment{
+		ID:                 payID,
+		SessionID:          req.SessionID,
+		RestaurantID:       req.RestaurantID,
+		Method:             payment.MethodPosCard,
+		Amount:             req.Amount,
+		Status:             payment.StateConfirmed,
+		ConfirmedByStaffID: req.ConfirmedByStaffID,
+		ConfirmedAt:        &now,
+		Version:            1,
+		CreatedAt:          now,
+		UpdatedAt:          now,
+	}, nil
+}

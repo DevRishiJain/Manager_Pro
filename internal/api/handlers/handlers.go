@@ -8,6 +8,7 @@ import (
 	"net/http"
 	"strconv"
 	"strings"
+	"sync"
 	"time"
 
 	"golang.org/x/crypto/bcrypt"
@@ -23,6 +24,7 @@ import (
 	"github.com/devrishijain/table-manager/internal/domain/session"
 	"github.com/devrishijain/table-manager/internal/service"
 	"github.com/devrishijain/table-manager/internal/storage"
+	"github.com/devrishijain/table-manager/internal/ws"
 	"github.com/go-chi/chi/v5"
 	"github.com/google/uuid"
 )
@@ -43,6 +45,7 @@ type APIHandler struct {
 	repo              storage.Repository
 	webhookSecret     string
 	jwtSecret         []byte
+	wsTicketManager   *ws.TicketManager
 }
 
 func (h *APIHandler) SetJWTSecret(secret []byte) {
@@ -54,6 +57,14 @@ func (h *APIHandler) getJWTSecret() []byte {
 		return []byte("table-manager-staff-secret-key-32b")
 	}
 	return h.jwtSecret
+}
+
+func (h *APIHandler) SetWSTicketManager(tm *ws.TicketManager) {
+	h.wsTicketManager = tm
+}
+
+func (h *APIHandler) GetWSTicketManager() *ws.TicketManager {
+	return h.wsTicketManager
 }
 
 func (h *APIHandler) SetAICatalogService(aiSvc *service.AICatalogService) {
@@ -257,7 +268,7 @@ func (h *APIHandler) GetSessionDetails(w http.ResponseWriter, r *http.Request) {
 		"payments": payments,
 	}
 
-	if h.exitService != nil {
+	if h.exitService != nil && (sess.Status == session.StatePaid || sess.Status == session.StateCompleted) {
 		if ep, err := h.exitService.GetExitPass(r.Context(), sessionID); err == nil && ep != nil {
 			resp["exit_pass"] = ep
 			resp["exit_otp"] = ep.RawOTP
@@ -562,6 +573,44 @@ func (h *APIHandler) StaffConfirmPayment(w http.ResponseWriter, r *http.Request)
 	jsonResponse(w, http.StatusOK, p)
 }
 
+type VoidPaymentRequest struct {
+	Reason string `json:"reason"`
+}
+
+func (h *APIHandler) StaffVoidPayment(w http.ResponseWriter, r *http.Request) {
+	claims, ok := middleware.GetStaffClaimsFromContext(r.Context())
+	if !ok {
+		errorResponse(w, http.StatusUnauthorized, "unauthorized staff")
+		return
+	}
+
+	if claims.Role != "MANAGER" && claims.Role != "RESTAURANT_ADMIN" && claims.Role != "RESTAURANT_OWNER" {
+		errorResponse(w, http.StatusForbidden, "forbidden: manager or admin authorization required to void payment")
+		return
+	}
+
+	payIDStr := chi.URLParam(r, "id")
+	paymentID, err := uuid.Parse(payIDStr)
+	if err != nil {
+		errorResponse(w, http.StatusBadRequest, "invalid payment id")
+		return
+	}
+
+	var req VoidPaymentRequest
+	_ = json.NewDecoder(r.Body).Decode(&req)
+	if req.Reason == "" {
+		req.Reason = "Payment voided by manager"
+	}
+
+	voided, err := h.paymentService.VoidPayment(r.Context(), paymentID, claims.StaffID, req.Reason)
+	if err != nil {
+		errorResponse(w, http.StatusBadRequest, err.Error())
+		return
+	}
+
+	jsonResponse(w, http.StatusOK, voided)
+}
+
 type ForceCloseRequest struct {
 	Reason string `json:"reason"`
 }
@@ -619,14 +668,25 @@ func (h *APIHandler) resolveRestaurantID(ctx context.Context, param string) uuid
 
 func (h *APIHandler) GetTableDashboard(w http.ResponseWriter, r *http.Request) {
 	var restaurantID uuid.UUID
-	if restParam := r.URL.Query().Get("restaurant_id"); restParam != "" {
+	if claims, ok := middleware.GetStaffClaimsFromContext(r.Context()); ok && claims.RestaurantID != uuid.Nil {
+		restaurantID = claims.RestaurantID
+		if claims.IsSuperAdmin() {
+			if restParam := r.URL.Query().Get("restaurant_id"); restParam != "" {
+				if parsed := h.resolveRestaurantID(r.Context(), restParam); parsed != uuid.Nil {
+					restaurantID = parsed
+				}
+			}
+		} else if restParam := r.URL.Query().Get("restaurant_id"); restParam != "" {
+			requestedID := h.resolveRestaurantID(r.Context(), restParam)
+			if requestedID != uuid.Nil && requestedID != restaurantID {
+				errorResponse(w, http.StatusForbidden, "unauthorized access to tables of another restaurant")
+				return
+			}
+		}
+	} else if restParam := r.URL.Query().Get("restaurant_id"); restParam != "" {
 		restaurantID = h.resolveRestaurantID(r.Context(), restParam)
 	}
-	if restaurantID == uuid.Nil {
-		if claims, ok := middleware.GetStaffClaimsFromContext(r.Context()); ok && claims.RestaurantID != uuid.Nil {
-			restaurantID = claims.RestaurantID
-		}
-	}
+
 	if restaurantID == uuid.Nil {
 		errorResponse(w, http.StatusBadRequest, "restaurant_id is required")
 		return
@@ -649,7 +709,6 @@ func (h *APIHandler) GetTableDashboard(w http.ResponseWriter, r *http.Request) {
 
 		var assistReason string
 		var assistAt *string
-		var sessObj interface{}
 		if s, ok := sessionByTable[t.ID]; ok {
 			isOccupied = true
 			sessID = s.ID.String()
@@ -659,7 +718,6 @@ func (h *APIHandler) GetTableDashboard(w http.ResponseWriter, r *http.Request) {
 			custName = s.CustomerName
 			custPhone = s.CustomerPhone
 			guestCount = s.GuestCount
-			sessObj = s
 			assistReason = s.AssistanceReason
 			if s.AssistanceRequestedAt != nil {
 				formatted := s.AssistanceRequestedAt.Format(time.RFC3339)
@@ -686,8 +744,6 @@ func (h *APIHandler) GetTableDashboard(w http.ResponseWriter, r *http.Request) {
 			"guest_count":             guestCount,
 			"assistance_reason":       assistReason,
 			"assistance_requested_at": assistAt,
-			"table":                   t,
-			"session":                 sessObj,
 		}
 		board = append(board, entry)
 	}
@@ -748,18 +804,29 @@ func (h *APIHandler) StaffVerifyExit(w http.ResponseWriter, r *http.Request) {
 // ---------------- Kitchen KDS Handlers ----------------
 
 func (h *APIHandler) GetKitchenQueue(w http.ResponseWriter, r *http.Request) {
-	var restaurantID uuid.UUID
-	if restParam := r.URL.Query().Get("restaurant_id"); restParam != "" {
-		restaurantID = h.resolveRestaurantID(r.Context(), restParam)
+	claims, ok := middleware.GetStaffClaimsFromContext(r.Context())
+	if !ok {
+		errorResponse(w, http.StatusUnauthorized, "unauthorized staff")
+		return
 	}
-	if restaurantID == uuid.Nil {
-		if claims, ok := middleware.GetStaffClaimsFromContext(r.Context()); ok && claims.RestaurantID != uuid.Nil {
-			restaurantID = claims.RestaurantID
+
+	restaurantID := claims.RestaurantID
+	if claims.IsSuperAdmin() {
+		if restParam := r.URL.Query().Get("restaurant_id"); restParam != "" {
+			if parsed := h.resolveRestaurantID(r.Context(), restParam); parsed != uuid.Nil {
+				restaurantID = parsed
+			}
+		}
+	} else if restParam := r.URL.Query().Get("restaurant_id"); restParam != "" {
+		requestedID := h.resolveRestaurantID(r.Context(), restParam)
+		if requestedID != uuid.Nil && requestedID != restaurantID {
+			errorResponse(w, http.StatusForbidden, "unauthorized access to kitchen queue of another restaurant")
+			return
 		}
 	}
 
 	if restaurantID == uuid.Nil {
-		errorResponse(w, http.StatusBadRequest, "restaurant_id is required either from staff authentication or query parameter")
+		errorResponse(w, http.StatusBadRequest, "restaurant_id is required from staff authentication")
 		return
 	}
 
@@ -777,6 +844,14 @@ type UpdateKitchenStatusRequest struct {
 }
 
 func (h *APIHandler) UpdateKitchenStatus(w http.ResponseWriter, r *http.Request) {
+	claims, ok := middleware.GetStaffClaimsFromContext(r.Context())
+	if !ok {
+		errorResponse(w, http.StatusUnauthorized, "unauthorized staff")
+		return
+	}
+	staffID := claims.StaffID
+	restaurantID := claims.RestaurantID
+
 	orderIDStr := chi.URLParam(r, "id")
 	orderID, err := uuid.Parse(orderIDStr)
 	if err != nil {
@@ -784,14 +859,20 @@ func (h *APIHandler) UpdateKitchenStatus(w http.ResponseWriter, r *http.Request)
 		return
 	}
 
-	var staffID uuid.UUID
-	if claims, ok := middleware.GetStaffClaimsFromContext(r.Context()); ok && claims.StaffID != uuid.Nil {
-		staffID = claims.StaffID
-	}
-
 	var req UpdateKitchenStatusRequest
 	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
 		errorResponse(w, http.StatusBadRequest, "invalid payload")
+		return
+	}
+
+	existingOrder, err := h.repo.GetOrderByID(r.Context(), orderID)
+	if err != nil || existingOrder == nil {
+		errorResponse(w, http.StatusNotFound, "order not found")
+		return
+	}
+
+	if !claims.IsSuperAdmin() && existingOrder.RestaurantID != restaurantID {
+		errorResponse(w, http.StatusForbidden, "unauthorized access to order from another restaurant")
 		return
 	}
 
@@ -1601,13 +1682,23 @@ func (h *APIHandler) GetPendingOrders(w http.ResponseWriter, r *http.Request) {
 
 func (h *APIHandler) GetRestaurantOrders(w http.ResponseWriter, r *http.Request) {
 	var restaurantID uuid.UUID
-	if restParam := r.URL.Query().Get("restaurant_id"); restParam != "" {
-		restaurantID = h.resolveRestaurantID(r.Context(), restParam)
-	}
-	if restaurantID == uuid.Nil {
-		if claims, ok := middleware.GetStaffClaimsFromContext(r.Context()); ok && claims.RestaurantID != uuid.Nil {
-			restaurantID = claims.RestaurantID
+	if claims, ok := middleware.GetStaffClaimsFromContext(r.Context()); ok && claims.RestaurantID != uuid.Nil {
+		restaurantID = claims.RestaurantID
+		if claims.IsSuperAdmin() {
+			if restParam := r.URL.Query().Get("restaurant_id"); restParam != "" {
+				if parsed := h.resolveRestaurantID(r.Context(), restParam); parsed != uuid.Nil {
+					restaurantID = parsed
+				}
+			}
+		} else if restParam := r.URL.Query().Get("restaurant_id"); restParam != "" {
+			requestedID := h.resolveRestaurantID(r.Context(), restParam)
+			if requestedID != uuid.Nil && requestedID != restaurantID {
+				errorResponse(w, http.StatusForbidden, "unauthorized access to orders of another restaurant")
+				return
+			}
 		}
+	} else if restParam := r.URL.Query().Get("restaurant_id"); restParam != "" {
+		restaurantID = h.resolveRestaurantID(r.Context(), restParam)
 	}
 
 	if restaurantID == uuid.Nil {
@@ -1939,6 +2030,31 @@ func (h *APIHandler) GetFraudReviewQueue(w http.ResponseWriter, r *http.Request)
 		}
 	}
 
+	limit := 50
+	if lStr := r.URL.Query().Get("limit"); lStr != "" {
+		if parsed, err := strconv.Atoi(lStr); err == nil && parsed > 0 {
+			limit = parsed
+		}
+	}
+	offset := 0
+	if oStr := r.URL.Query().Get("offset"); oStr != "" {
+		if parsed, err := strconv.Atoi(oStr); err == nil && parsed >= 0 {
+			offset = parsed
+		}
+	}
+
+	if offset > len(flags) {
+		flags = []FraudFlag{}
+	} else {
+		flags = flags[offset:]
+		if limit < len(flags) {
+			flags = flags[:limit]
+		}
+	}
+	if flags == nil {
+		flags = []FraudFlag{}
+	}
+
 	jsonResponse(w, http.StatusOK, flags)
 }
 
@@ -2137,9 +2253,45 @@ func (h *APIHandler) AICatalogMenu(w http.ResponseWriter, r *http.Request) {
 }
 
 // AIQueryMenu handles natural language questions and semantic data retrieval over stored menu items using Gemini AI.
+var (
+	aiQueryRateMu sync.Mutex
+	aiQueryLimits = make(map[string][]time.Time)
+)
+
+func checkAIQueryRateLimit(clientIP string) bool {
+	aiQueryRateMu.Lock()
+	defer aiQueryRateMu.Unlock()
+
+	now := time.Now()
+	cutoff := now.Add(-1 * time.Minute)
+
+	times := aiQueryLimits[clientIP]
+	var recent []time.Time
+	for _, t := range times {
+		if t.After(cutoff) {
+			recent = append(recent, t)
+		}
+	}
+	if len(recent) >= 10 {
+		return false
+	}
+	recent = append(recent, now)
+	aiQueryLimits[clientIP] = recent
+	return true
+}
+
 func (h *APIHandler) AIQueryMenu(w http.ResponseWriter, r *http.Request) {
 	if h.aiCatalogService == nil {
 		errorResponse(w, http.StatusServiceUnavailable, "AI service is not initialized")
+		return
+	}
+
+	clientIP := r.RemoteAddr
+	if idx := strings.LastIndex(clientIP, ":"); idx != -1 {
+		clientIP = clientIP[:idx]
+	}
+	if !checkAIQueryRateLimit(clientIP) {
+		errorResponse(w, http.StatusTooManyRequests, "AI query rate limit exceeded (max 10 requests per minute)")
 		return
 	}
 
@@ -2622,7 +2774,7 @@ func (h *APIHandler) CreateTable(w http.ResponseWriter, r *http.Request) {
 
 	token := strings.TrimSpace(req.TableToken)
 	if token == "" {
-		randToken, err := crypto.GenerateRandomToken(16)
+		randToken, err := crypto.GenerateRandomToken(24)
 		if err != nil {
 			token = fmt.Sprintf("TBL-%s-%d", claims.RestaurantID.String()[:4], time.Now().UnixNano()%10000)
 		} else {
@@ -2650,6 +2802,25 @@ func (h *APIHandler) CreateTable(w http.ResponseWriter, r *http.Request) {
 	jsonResponse(w, http.StatusCreated, tbl)
 }
 
+func (h *APIHandler) GenerateTableToken(w http.ResponseWriter, r *http.Request) {
+	claims, ok := middleware.GetStaffClaimsFromContext(r.Context())
+	if !ok {
+		errorResponse(w, http.StatusUnauthorized, "unauthorized staff")
+		return
+	}
+
+	token, err := crypto.GenerateRandomToken(24)
+	if err != nil {
+		errorResponse(w, http.StatusInternalServerError, "failed to generate table token")
+		return
+	}
+
+	jsonResponse(w, http.StatusOK, map[string]interface{}{
+		"restaurant_id": claims.RestaurantID,
+		"table_token":   token,
+	})
+}
+
 func (h *APIHandler) ListTables(w http.ResponseWriter, r *http.Request) {
 	claims, ok := middleware.GetStaffClaimsFromContext(r.Context())
 	if !ok {
@@ -2665,3 +2836,91 @@ func (h *APIHandler) ListTables(w http.ResponseWriter, r *http.Request) {
 
 	jsonResponse(w, http.StatusOK, tables)
 }
+
+func (h *APIHandler) GetWSTicket(w http.ResponseWriter, r *http.Request) {
+	if h.wsTicketManager == nil {
+		h.wsTicketManager = ws.NewTicketManager(30 * time.Second)
+	}
+
+	// 1. Context-based Staff Claims
+	if staffClaims, ok := middleware.GetStaffClaimsFromContext(r.Context()); ok && staffClaims != nil {
+		ticket, err := h.wsTicketManager.IssueStaffTicket(staffClaims.RestaurantID, staffClaims.StaffID, staffClaims.Role)
+		if err != nil {
+			errorResponse(w, http.StatusInternalServerError, "failed to generate staff ticket")
+			return
+		}
+		jsonResponse(w, http.StatusOK, map[string]interface{}{
+			"ticket":     ticket,
+			"expires_in": 30,
+			"role":       staffClaims.Role,
+		})
+		return
+	}
+
+	// 2. Context-based Customer Session
+	if sess, ok := middleware.GetSessionFromContext(r.Context()); ok && sess != nil {
+		ticket, err := h.wsTicketManager.IssueCustomerTicket(sess.RestaurantID, sess.ID)
+		if err != nil {
+			errorResponse(w, http.StatusInternalServerError, "failed to generate customer ticket")
+			return
+		}
+		jsonResponse(w, http.StatusOK, map[string]interface{}{
+			"ticket":     ticket,
+			"expires_in": 30,
+			"role":       "CUSTOMER",
+			"session_id": sess.ID,
+		})
+		return
+	}
+
+	// 3. Header-based fallback (Authorization Bearer or X-Session-Token)
+	authHeader := r.Header.Get("Authorization")
+	var tokenStr string
+	if strings.HasPrefix(authHeader, "Bearer ") {
+		tokenStr = strings.TrimPrefix(authHeader, "Bearer ")
+	}
+	sessHeader := r.Header.Get("X-Session-Token")
+	if sessHeader != "" {
+		tokenStr = sessHeader
+	}
+
+	if tokenStr == "" {
+		errorResponse(w, http.StatusUnauthorized, "authorization or session token required")
+		return
+	}
+
+	// Try parsing as Staff JWT
+	if staffClaims, err := crypto.ParseStaffJWT(h.getJWTSecret(), tokenStr); err == nil && staffClaims.StaffID != uuid.Nil {
+		ticket, err := h.wsTicketManager.IssueStaffTicket(staffClaims.RestaurantID, staffClaims.StaffID, staffClaims.Role)
+		if err != nil {
+			errorResponse(w, http.StatusInternalServerError, "failed to generate staff ticket")
+			return
+		}
+		jsonResponse(w, http.StatusOK, map[string]interface{}{
+			"ticket":     ticket,
+			"expires_in": 30,
+			"role":       staffClaims.Role,
+		})
+		return
+	}
+
+	// Try looking up as Customer Session Token
+	sess, err := h.repo.GetSessionByToken(r.Context(), tokenStr)
+	if err == nil && sess != nil {
+		ticket, err := h.wsTicketManager.IssueCustomerTicket(sess.RestaurantID, sess.ID)
+		if err != nil {
+			errorResponse(w, http.StatusInternalServerError, "failed to generate customer ticket")
+			return
+		}
+		jsonResponse(w, http.StatusOK, map[string]interface{}{
+			"ticket":     ticket,
+			"expires_in": 30,
+			"role":       "CUSTOMER",
+			"session_id": sess.ID,
+		})
+		return
+	}
+
+	errorResponse(w, http.StatusUnauthorized, "invalid authorization or session credentials")
+}
+

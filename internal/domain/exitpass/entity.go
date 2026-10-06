@@ -1,9 +1,11 @@
 package exitpass
 
 import (
+	"crypto/hmac"
 	"crypto/rand"
 	"crypto/sha256"
 	"crypto/subtle"
+	"encoding/binary"
 	"encoding/hex"
 	"errors"
 	"fmt"
@@ -98,6 +100,19 @@ func GenerateNumericOTP(digits int) (string, error) {
 	}
 	format := fmt.Sprintf("%%0%dd", digits)
 	return fmt.Sprintf(format, n.Int64()), nil
+}
+
+// DeriveExitOTP deterministically computes a 4-digit numeric OTP using HMAC-SHA256 from sessionID and secret.
+func DeriveExitOTP(sessionID uuid.UUID, secret string) string {
+	if secret == "" {
+		secret = "tableos-default-exit-secret-key-32b"
+	}
+	mac := hmac.New(sha256.New, []byte(secret))
+	mac.Write([]byte(sessionID.String()))
+	sum := mac.Sum(nil)
+	val := binary.BigEndian.Uint32(sum[:4])
+	otpNum := val % 10000
+	return fmt.Sprintf("%04d", otpNum)
 }
 
 type GuardVerificationResult string

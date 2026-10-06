@@ -14,6 +14,7 @@ import (
 	"github.com/devrishijain/table-manager/internal/domain/session"
 	"github.com/devrishijain/table-manager/pkg/crypto"
 	"github.com/devrishijain/table-manager/internal/storage"
+	"github.com/devrishijain/table-manager/internal/ws"
 	"github.com/google/uuid"
 )
 
@@ -29,11 +30,16 @@ var (
 )
 
 type SessionService struct {
-	repo storage.Repository
+	repo       storage.Repository
+	dispatcher *ws.OutboxDispatcher
 }
 
 func NewSessionService(repo storage.Repository) *SessionService {
 	return &SessionService{repo: repo}
+}
+
+func (s *SessionService) SetOutboxDispatcher(d *ws.OutboxDispatcher) {
+	s.dispatcher = d
 }
 
 // StartSession handles QR scan. If a session already exists for the table:
@@ -174,16 +180,12 @@ func (s *SessionService) StartSession(ctx context.Context, tableToken, deviceTok
 		CreatedAt:    now,
 	})
 
-	// Transactional outbox event
-	_ = s.repo.StoreOutboxEvent(ctx, &storage.OutboxEvent{
-		ID:           uuid.New(),
-		RestaurantID: table.RestaurantID,
-		EventType:    "SESSION_STARTED",
-		AggregateID:  newSession.ID.String(),
-		Payload:      sessionBytes,
-		Status:       storage.OutboxStatusPending,
-		CreatedAt:    now,
-	})
+	// Broadcast SESSION_STARTED event via outbox and realtime hub
+	rooms := []string{
+		fmt.Sprintf("restaurant:%s:floor", newSession.RestaurantID.String()),
+		fmt.Sprintf("session:%s", newSession.ID.String()),
+	}
+	_, _ = ws.PublishEventToRooms(ctx, s.repo, s.dispatcher, newSession.RestaurantID, "SESSION_STARTED", rooms, newSession.ID.String(), newSession)
 
 	return newSession, true, nil
 }
@@ -242,6 +244,17 @@ func (s *SessionService) VerifyFirstOrder(ctx context.Context, sessionID, staffI
 		AfterState:   afterBytes,
 		CreatedAt:    now,
 	})
+
+	if s.dispatcher != nil {
+		_, _ = ws.PublishEventToRooms(ctx, s.repo, s.dispatcher, sess.RestaurantID, "SESSION_VERIFIED", []string{
+			fmt.Sprintf("session:%s", sessionID),
+			fmt.Sprintf("restaurant:%s:floor", sess.RestaurantID),
+		}, sess.ID.String(), map[string]interface{}{
+			"session_id":  sessionID,
+			"status":      sess.Status,
+			"verified_at": now,
+		})
+	}
 
 	return nil
 }
@@ -303,6 +316,13 @@ func (s *SessionService) ForceCloseSession(ctx context.Context, sessionID, staff
 		Reason:       reason,
 		CreatedAt:    now,
 	})
+
+	rooms := []string{
+		fmt.Sprintf("session:%s", sess.ID.String()),
+		fmt.Sprintf("restaurant:%s:floor", sess.RestaurantID.String()),
+		fmt.Sprintf("restaurant:%s:dashboard", sess.RestaurantID.String()),
+	}
+	_, _ = ws.PublishEventToRooms(ctx, s.repo, s.dispatcher, sess.RestaurantID, "SESSION_CLOSED", rooms, sess.ID.String(), sess)
 
 	return nil
 }
@@ -415,6 +435,13 @@ func (s *SessionService) RequestAssistance(ctx context.Context, sessionID uuid.U
 		CreatedAt:    now,
 	})
 
+	rooms := []string{
+		fmt.Sprintf("restaurant:%s:floor", sess.RestaurantID.String()),
+		fmt.Sprintf("restaurant:%s:waiter", sess.RestaurantID.String()),
+		fmt.Sprintf("session:%s", sess.ID.String()),
+	}
+	_, _ = ws.PublishEventToRooms(ctx, s.repo, s.dispatcher, sess.RestaurantID, "ASSISTANCE_REQUESTED", rooms, sess.ID.String(), sess)
+
 	return sess, nil
 }
 
@@ -432,6 +459,13 @@ func (s *SessionService) DismissAssistance(ctx context.Context, sessionID uuid.U
 	if err := s.repo.UpdateSession(ctx, sess); err != nil {
 		return nil, err
 	}
+
+	rooms := []string{
+		fmt.Sprintf("restaurant:%s:floor", sess.RestaurantID.String()),
+		fmt.Sprintf("restaurant:%s:waiter", sess.RestaurantID.String()),
+		fmt.Sprintf("session:%s", sess.ID.String()),
+	}
+	_, _ = ws.PublishEventToRooms(ctx, s.repo, s.dispatcher, sess.RestaurantID, "ASSISTANCE_DISMISSED", rooms, sess.ID.String(), sess)
 
 	return sess, nil
 }

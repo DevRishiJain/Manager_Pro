@@ -42,6 +42,7 @@ func main() {
 		"internal/storage/postgres/migrations/006_dining_sessions_vehicle_number.sql",
 		"internal/storage/postgres/migrations/007_expenses_inventory_recipes.sql",
 		"internal/storage/postgres/migrations/008_expense_inventory_order_correlation.sql",
+		"internal/storage/postgres/migrations/009_db_optimization_and_cleanup.sql",
 	}
 
 	for _, file := range migrationFiles {

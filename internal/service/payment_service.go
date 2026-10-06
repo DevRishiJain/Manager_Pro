@@ -13,15 +13,18 @@ import (
 	"github.com/devrishijain/table-manager/internal/domain/payment"
 	"github.com/devrishijain/table-manager/internal/domain/session"
 	"github.com/devrishijain/table-manager/internal/storage"
+	"github.com/devrishijain/table-manager/internal/ws"
 	"github.com/google/uuid"
 )
 
 var (
-	ErrPaymentNotFound    = errors.New("payment not found")
-	ErrRefundExceedsPaid  = errors.New("refund amount exceeds original confirmed payment")
-	ErrAdapterNotFound    = errors.New("no payment adapter registered for method")
-	ErrSessionNotPayable  = errors.New("session is not in a payable state")
-	ErrUnauthorizedRefund = errors.New("unauthorized: manager or owner role required to issue refunds")
+	ErrPaymentNotFound        = errors.New("payment not found")
+	ErrRefundExceedsPaid      = errors.New("refund amount exceeds original confirmed payment")
+	ErrAdapterNotFound        = errors.New("no payment adapter registered for method")
+	ErrSessionNotPayable      = errors.New("session is not in a payable state")
+	ErrUnauthorizedRefund     = errors.New("unauthorized: manager or owner role required to issue refunds")
+	ErrOnlinePaymentsDisabled = errors.New("online payments are currently disabled; please select Cash, UPI QR, or Card at counter")
+	ErrSessionAlreadyPaid     = errors.New("session balance is already fully settled")
 )
 
 type PaymentService struct {
@@ -29,6 +32,12 @@ type PaymentService struct {
 	adapters      map[payment.Method]payment.PaymentConfirmationAdapter
 	ledgerService *LedgerService
 	exitService   *ExitService
+	onlineEnabled bool
+	dispatcher    *ws.OutboxDispatcher
+}
+
+func (s *PaymentService) SetOutboxDispatcher(d *ws.OutboxDispatcher) {
+	s.dispatcher = d
 }
 
 func NewPaymentService(
@@ -42,6 +51,8 @@ func NewPaymentService(
 	adapters[payment.MethodCash] = adapterpay.NewCashAdapter()
 	adapters[payment.MethodRestaurantPOS] = adapterpay.NewRestaurantPOSAdapter()
 	adapters[payment.MethodExternalPlatform] = adapterpay.NewExternalPlatformAdapter()
+	adapters[payment.MethodUPIQR] = adapterpay.NewUPIQRAdapter()
+	adapters[payment.MethodPosCard] = adapterpay.NewPOSCardAdapter()
 	adapters["POS_DIRECT_API"] = adapterpay.NewPOSDirectAPIAdapter()
 
 	return &PaymentService{
@@ -49,7 +60,12 @@ func NewPaymentService(
 		adapters:      adapters,
 		ledgerService: ledgerService,
 		exitService:   exitService,
+		onlineEnabled: false, // Cash-first by default
 	}
+}
+
+func (s *PaymentService) SetOnlineEnabled(enabled bool) {
+	s.onlineEnabled = enabled
 }
 
 // RequestBill moves session from OPEN_VERIFIED to AWAITING_PAYMENT, locking running_total into final_total.
@@ -72,19 +88,53 @@ func (s *PaymentService) RequestBill(ctx context.Context, sessionID uuid.UUID) (
 		if err := s.repo.UpdateSession(ctx, sess); err != nil {
 			return nil, err
 		}
+
+		if s.dispatcher != nil {
+			rooms := []string{
+				fmt.Sprintf("session:%s", sess.ID.String()),
+				fmt.Sprintf("restaurant:%s:floor", sess.RestaurantID.String()),
+			}
+			_, _ = ws.PublishEventToRooms(ctx, s.repo, s.dispatcher, sess.RestaurantID, "BILL_REQUESTED", rooms, sess.ID.String(), sess)
+		}
 	}
 
 	return sess, nil
 }
 
-// InitiatePayment creates a PENDING_CONFIRMATION Payment record.
+// InitiatePayment creates a PENDING_CONFIRMATION Payment record with strict server-side balance validation.
 func (s *PaymentService) InitiatePayment(ctx context.Context, sessionID uuid.UUID, method payment.Method, amount money.Money, externalPlatformName *string) (*payment.Payment, error) {
+	if method == payment.MethodOwnGateway && !s.onlineEnabled {
+		return nil, ErrOnlinePaymentsDisabled
+	}
+
 	sess, err := s.repo.GetSessionByID(ctx, sessionID)
 	if err != nil {
 		return nil, ErrSessionNotFound
 	}
 	if sess.Status != session.StateAwaitingPayment && sess.Status != session.StateOpenVerified {
 		return nil, ErrSessionNotPayable
+	}
+
+	// Calculate remaining unpaid balance on server
+	allPayments, _ := s.repo.GetPaymentsBySessionID(ctx, sessionID)
+	var totalPaidMinor int64
+	for _, pay := range allPayments {
+		if pay.Status == payment.StateConfirmed {
+			totalPaidMinor += pay.Amount.AmountMinorUnits
+		}
+	}
+
+	targetBill := sess.FinalTotal
+	if targetBill.IsZero() {
+		targetBill = sess.RunningTotal
+	}
+	remainingMinor := targetBill.AmountMinorUnits - totalPaidMinor
+	if remainingMinor <= 0 && targetBill.AmountMinorUnits > 0 {
+		return nil, ErrSessionAlreadyPaid
+	}
+
+	if amount.IsZero() || amount.AmountMinorUnits <= 0 {
+		amount = money.New(remainingMinor)
 	}
 
 	now := time.Now()
@@ -104,6 +154,13 @@ func (s *PaymentService) InitiatePayment(ctx context.Context, sessionID uuid.UUI
 	if err := s.repo.CreatePayment(ctx, p); err != nil {
 		return nil, err
 	}
+
+	rooms := []string{
+		fmt.Sprintf("session:%s", p.SessionID.String()),
+		fmt.Sprintf("restaurant:%s:floor", p.RestaurantID.String()),
+	}
+	_, _ = ws.PublishEventToRooms(ctx, s.repo, s.dispatcher, p.RestaurantID, "PAYMENT_INITIATED", rooms, p.ID.String(), p)
+
 	return p, nil
 }
 
@@ -265,6 +322,13 @@ func (s *PaymentService) ConfirmPayment(ctx context.Context, req payment.Payment
 		}
 	}
 
+	rooms := []string{
+		fmt.Sprintf("session:%s", confirmedPayment.SessionID.String()),
+		fmt.Sprintf("restaurant:%s:floor", confirmedPayment.RestaurantID.String()),
+		fmt.Sprintf("restaurant:%s:dashboard", confirmedPayment.RestaurantID.String()),
+	}
+	_, _ = ws.PublishEventToRooms(ctx, s.repo, s.dispatcher, confirmedPayment.RestaurantID, "PAYMENT_CONFIRMED", rooms, confirmedPayment.ID.String(), confirmedPayment)
+
 	return confirmedPayment, nil
 }
 
@@ -310,4 +374,90 @@ func (s *PaymentService) IssueRefund(ctx context.Context, paymentID, staffID uui
 
 func (s *PaymentService) GetPaymentsBySession(ctx context.Context, sessionID uuid.UUID) ([]payment.Payment, error) {
 	return s.repo.GetPaymentsBySessionID(ctx, sessionID)
+}
+
+// VoidPayment handles manager-authorized payment voiding with state reversal and immutable audit logging.
+func (s *PaymentService) VoidPayment(ctx context.Context, paymentID, staffID uuid.UUID, reason string) (*payment.Payment, error) {
+	p, err := s.repo.GetPaymentByID(ctx, paymentID)
+	if err != nil {
+		return nil, ErrPaymentNotFound
+	}
+	if p.Status != payment.StateConfirmed {
+		return nil, fmt.Errorf("cannot void payment in status %s: only confirmed payments can be voided", p.Status)
+	}
+
+	// Verify manager permissions
+	staff, err := s.repo.GetStaffByID(ctx, staffID)
+	if err != nil {
+		return nil, errors.New("unauthorized: staff member not found")
+	}
+	if staff.RestaurantID != p.RestaurantID {
+		return nil, errors.New("unauthorized: cross-tenant staff action")
+	}
+	if staff.Role != "MANAGER" && staff.Role != "RESTAURANT_ADMIN" && staff.Role != "RESTAURANT_OWNER" {
+		return nil, errors.New("unauthorized: manager or admin role required to void payment")
+	}
+
+	if err := payment.ValidateTransition(p.Status, payment.StateVoided); err != nil {
+		return nil, err
+	}
+
+	now := time.Now()
+	p.Status = payment.StateVoided
+	p.UpdatedAt = now
+	if err := s.repo.UpdatePayment(ctx, p); err != nil {
+		return nil, err
+	}
+
+	// Reconcile session state if it was terminal or paid
+	sess, err := s.repo.GetSessionByID(ctx, p.SessionID)
+	if err == nil {
+		allPayments, _ := s.repo.GetPaymentsBySessionID(ctx, p.SessionID)
+		var remainingPaidMinor int64
+		for _, pay := range allPayments {
+			if pay.Status == payment.StateConfirmed {
+				remainingPaidMinor += pay.Amount.AmountMinorUnits
+			}
+		}
+		if remainingPaidMinor < sess.FinalTotal.AmountMinorUnits {
+			if sess.Status == session.StatePaid || sess.Status == session.StateCompleted {
+				sess.Status = session.StateAwaitingPayment
+				sess.UpdatedAt = now
+				_ = s.repo.UpdateSession(ctx, sess)
+			}
+		}
+	}
+
+	// Audit logging & Outbox event
+	payBytes, _ := json.Marshal(p)
+	auditID := uuid.New()
+	_ = s.repo.AppendAuditLog(ctx, &audit.AuditLog{
+		ID:           auditID,
+		ActorType:    audit.ActorTypeStaff,
+		ActorID:      staffID.String(),
+		RestaurantID: p.RestaurantID,
+		SessionID:    &p.SessionID,
+		Action:       "PAYMENT_VOIDED",
+		AfterState:   payBytes,
+		CreatedAt:    now,
+	})
+	_ = s.repo.AppendStaffAction(ctx, &audit.StaffAction{
+		ID:           uuid.New(),
+		AuditLogID:   auditID,
+		StaffID:      staffID,
+		RestaurantID: p.RestaurantID,
+		SessionID:    &p.SessionID,
+		ActionType:   "PAYMENT_VOID",
+		Reason:       reason,
+		Metadata:     payBytes,
+		CreatedAt:    now,
+	})
+	rooms := []string{
+		fmt.Sprintf("session:%s", p.SessionID.String()),
+		fmt.Sprintf("restaurant:%s:floor", p.RestaurantID.String()),
+		fmt.Sprintf("restaurant:%s:dashboard", p.RestaurantID.String()),
+	}
+	_, _ = ws.PublishEventToRooms(ctx, s.repo, s.dispatcher, p.RestaurantID, "PAYMENT_VOIDED", rooms, p.ID.String(), p)
+
+	return p, nil
 }

@@ -19,6 +19,7 @@ import (
 	"github.com/devrishijain/table-manager/internal/storage/memory"
 	"github.com/devrishijain/table-manager/internal/storage/postgres"
 	"github.com/devrishijain/table-manager/internal/worker"
+	"github.com/devrishijain/table-manager/internal/ws"
 	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgxpool"
 )
@@ -42,26 +43,51 @@ func main() {
 	)
 
 	// Storage initialization
-	var repo domainstorage.Repository = memory.NewMemoryRepository()
+	var repo domainstorage.Repository
 	if cfg.Database.URL != "" {
-		poolCtx, poolCancel := context.WithTimeout(context.Background(), 5*time.Second)
+		poolCtx, poolCancel := context.WithTimeout(context.Background(), 20*time.Second)
 		pgxCfg, err := pgxpool.ParseConfig(cfg.Database.URL)
-		if err == nil {
-			pgxCfg.MaxConns = int32(cfg.Database.MaxOpenConns)
-			pgxCfg.MinConns = int32(cfg.Database.MaxIdleConns)
-			pgxCfg.AfterConnect = func(ctx context.Context, conn *pgx.Conn) error {
-				_, err := conn.Exec(ctx, "SET app.is_platform_admin = 'true'")
-				return err
-			}
-			pool, err := pgxpool.NewWithConfig(poolCtx, pgxCfg)
-			if err == nil && pool.Ping(poolCtx) == nil {
-				repo = postgres.NewPostgresRepository(pool)
-				logger.Info("PostgreSQL database repository connected & active", "db_url", cfg.Database.URL)
-			} else {
-				logger.Warn("PostgreSQL connection failed, using memory fallback", "error", err)
-			}
+		if err != nil {
+			logger.Error("Invalid PostgreSQL database URL configuration", "error", err)
+			os.Exit(1)
+		}
+
+		pgxCfg.MaxConns = int32(cfg.Database.MaxOpenConns)
+		pgxCfg.MinConns = int32(cfg.Database.MaxIdleConns)
+		pgxCfg.AfterConnect = func(ctx context.Context, conn *pgx.Conn) error {
+			_, err := conn.Exec(ctx, "SET app.is_platform_admin = 'true'")
+			return err
+		}
+
+		pool, poolErr := pgxpool.NewWithConfig(poolCtx, pgxCfg)
+		var pingErr error
+		if poolErr == nil {
+			pingErr = pool.Ping(poolCtx)
 		}
 		poolCancel()
+
+		if poolErr == nil && pingErr == nil {
+			repo = postgres.NewPostgresRepository(pool)
+			logger.Info("PostgreSQL database repository connected & active", "db_url", cfg.Database.URL)
+		} else {
+			connErr := poolErr
+			if connErr == nil {
+				connErr = pingErr
+			}
+			if !cfg.Database.AllowMemoryFallback {
+				logger.Error("FATAL: PostgreSQL connection failed and memory fallback is disabled (ALLOW_MEMORY_FALLBACK=false). Set ALLOW_MEMORY_FALLBACK=true if in-memory fallback is desired.", "error", connErr)
+				os.Exit(1)
+			}
+			logger.Warn("PostgreSQL connection failed, using memory fallback (ALLOW_MEMORY_FALLBACK=true)", "error", connErr)
+			repo = memory.NewMemoryRepository()
+		}
+	} else {
+		if !cfg.Database.AllowMemoryFallback {
+			logger.Error("FATAL: DATABASE_URL is not configured and memory fallback is disabled. Set DATABASE_URL or set ALLOW_MEMORY_FALLBACK=true.")
+			os.Exit(1)
+		}
+		logger.Warn("DATABASE_URL not set, using memory repository (ALLOW_MEMORY_FALLBACK=true)")
+		repo = memory.NewMemoryRepository()
 	}
 
 	var objectStore storage.ObjectStore
@@ -80,6 +106,9 @@ func main() {
 	}
 
 	forecastProvider := forecast.NewWeightedMovingAverageForecast()
+
+	// Wrap repository with query tracker for metrics instrumentation
+	repo = domainstorage.NewTrackedRepository(repo)
 
 	// Service layers
 	sessionSvc := service.NewSessionService(repo)
@@ -128,7 +157,23 @@ func main() {
 		apiHandler.SetAICatalogService(aiCatalogSvc)
 	}
 
-	router := api.NewRouter(apiHandler, repo, []byte(cfg.Auth.JWTSecret))
+	// Real-Time WebSocket Hub, Ticket Manager & Outbox Dispatcher (§Phase 2)
+	wsHub := ws.NewHub()
+	wsHub.StartCleanup(ctx)
+	wsTM := ws.NewTicketManager(30 * time.Second)
+	wsServer := ws.NewServer(wsHub, wsTM, []string{"*"})
+	apiHandler.SetWSTicketManager(wsTM)
+
+	outboxDispatcher := ws.NewOutboxDispatcher(wsHub, repo, logger)
+	go outboxDispatcher.Start(ctx)
+	defer outboxDispatcher.Stop()
+
+	orderSvc.SetOutboxDispatcher(outboxDispatcher)
+	sessionSvc.SetOutboxDispatcher(outboxDispatcher)
+	paymentSvc.SetOutboxDispatcher(outboxDispatcher)
+	exitSvc.SetOutboxDispatcher(outboxDispatcher)
+
+	router := api.NewRouter(apiHandler, repo, []byte(cfg.Auth.JWTSecret), wsServer)
 
 	server := &http.Server{
 		Addr:         ":" + cfg.App.Port,

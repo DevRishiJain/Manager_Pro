@@ -779,6 +779,66 @@ func (r *PostgresRepository) ListOrders(ctx context.Context, restaurantID uuid.U
 	return r.mem.ListOrders(ctx, restaurantID, limit, startDate, endDate)
 }
 
+func (r *PostgresRepository) RecordOrderStatusHistory(ctx context.Context, h *order.StatusHistory) error {
+	_ = r.mem.RecordOrderStatusHistory(ctx, h)
+	if r.pool != nil {
+		if h.ID == uuid.Nil {
+			h.ID = uuid.New()
+		}
+		if h.CreatedAt.IsZero() {
+			h.CreatedAt = time.Now()
+		}
+		_, err := r.pool.Exec(ctx, `
+			INSERT INTO order_status_history (id, order_id, restaurant_id, from_status, to_status, changed_by_staff_id, reason, created_at)
+			VALUES ($1, $2, $3, $4, $5, $6, $7, $8)
+			ON CONFLICT (id) DO NOTHING;
+		`, h.ID, h.OrderID, h.RestaurantID, string(h.FromStatus), string(h.ToStatus), h.ChangedByStaffID, h.Reason, h.CreatedAt)
+		if err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+func (r *PostgresRepository) GetOrderStatusHistory(ctx context.Context, orderID uuid.UUID) ([]order.StatusHistory, error) {
+	if r.pool != nil {
+		rows, err := r.pool.Query(ctx, `
+			SELECT id, order_id, restaurant_id, from_status, to_status, changed_by_staff_id, reason, created_at
+			FROM order_status_history
+			WHERE order_id = $1
+			ORDER BY created_at ASC;
+		`, orderID)
+		if err == nil {
+			defer rows.Close()
+			var history []order.StatusHistory
+			for rows.Next() {
+				var h order.StatusHistory
+				var fromStr, toStr string
+				var reason *string
+				if err := rows.Scan(
+					&h.ID,
+					&h.OrderID,
+					&h.RestaurantID,
+					&fromStr,
+					&toStr,
+					&h.ChangedByStaffID,
+					&reason,
+					&h.CreatedAt,
+				); err == nil {
+					h.FromStatus = order.State(fromStr)
+					h.ToStatus = order.State(toStr)
+					if reason != nil {
+						h.Reason = *reason
+					}
+					history = append(history, h)
+				}
+			}
+			return history, nil
+		}
+	}
+	return r.mem.GetOrderStatusHistory(ctx, orderID)
+}
+
 // ---------------- Payment ----------------
 
 func (r *PostgresRepository) CreatePayment(ctx context.Context, p *payment.Payment) error {
@@ -895,9 +955,6 @@ func (r *PostgresRepository) GetExitPassByID(ctx context.Context, id uuid.UUID) 
 		`, id).Scan(&ep.ID, &ep.SessionID, &ep.RestaurantID, &ep.OTPHash, &statusStr, &ep.ExpiresAt, &ep.CreatedAt, &ep.UpdatedAt)
 		if err == nil {
 			ep.Status = exitpass.State(statusStr)
-			if memEp, mErr := r.mem.GetExitPassByID(ctx, ep.ID); mErr == nil && memEp != nil && memEp.RawOTP != "" {
-				ep.RawOTP = memEp.RawOTP
-			}
 			return &ep, nil
 		}
 	}
@@ -916,11 +973,6 @@ func (r *PostgresRepository) GetExitPassBySessionID(ctx context.Context, session
 		`, sessionID).Scan(&ep.ID, &ep.SessionID, &ep.RestaurantID, &ep.OTPHash, &statusStr, &ep.ExpiresAt, &ep.CreatedAt, &ep.UpdatedAt)
 		if err == nil {
 			ep.Status = exitpass.State(statusStr)
-			if memEp, mErr := r.mem.GetExitPassBySessionID(ctx, sessionID); mErr == nil && memEp != nil && memEp.RawOTP != "" {
-				ep.RawOTP = memEp.RawOTP
-			} else if memEp, mErr := r.mem.GetExitPassByID(ctx, ep.ID); mErr == nil && memEp != nil && memEp.RawOTP != "" {
-				ep.RawOTP = memEp.RawOTP
-			}
 			return &ep, nil
 		}
 	}

@@ -54,8 +54,9 @@ type MemoryRepository struct {
 	sessionsByToken  map[string]*session.DiningSession
 	participants     map[uuid.UUID][]session.SessionParticipant
 
-	orders      map[uuid.UUID]*order.Order
-	orderItems  map[uuid.UUID][]order.OrderItem
+	orders             map[uuid.UUID]*order.Order
+	orderItems         map[uuid.UUID][]order.OrderItem
+	orderStatusHistory map[uuid.UUID][]order.StatusHistory
 
 	payments    map[uuid.UUID]*payment.Payment
 	refunds     map[uuid.UUID][]payment.Refund
@@ -99,8 +100,9 @@ func NewMemoryRepository() *MemoryRepository {
 		sessions:          make(map[uuid.UUID]*session.DiningSession),
 		sessionsByToken:   make(map[string]*session.DiningSession),
 		participants:      make(map[uuid.UUID][]session.SessionParticipant),
-		orders:            make(map[uuid.UUID]*order.Order),
-		orderItems:        make(map[uuid.UUID][]order.OrderItem),
+		orders:             make(map[uuid.UUID]*order.Order),
+		orderItems:         make(map[uuid.UUID][]order.OrderItem),
+		orderStatusHistory: make(map[uuid.UUID][]order.StatusHistory),
 		payments:          make(map[uuid.UUID]*payment.Payment),
 		refunds:           make(map[uuid.UUID][]payment.Refund),
 		adjustments:       make(map[uuid.UUID][]payment.Adjustment),
@@ -396,6 +398,34 @@ func (m *MemoryRepository) ListOrders(ctx context.Context, restaurantID uuid.UUI
 	return res, nil
 }
 
+func (m *MemoryRepository) RecordOrderStatusHistory(ctx context.Context, h *order.StatusHistory) error {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+
+	histCpy := *h
+	if histCpy.ID == uuid.Nil {
+		histCpy.ID = uuid.New()
+	}
+	if histCpy.CreatedAt.IsZero() {
+		histCpy.CreatedAt = time.Now()
+	}
+	m.orderStatusHistory[h.OrderID] = append(m.orderStatusHistory[h.OrderID], histCpy)
+	return nil
+}
+
+func (m *MemoryRepository) GetOrderStatusHistory(ctx context.Context, orderID uuid.UUID) ([]order.StatusHistory, error) {
+	m.mu.RLock()
+	defer m.mu.RUnlock()
+
+	list, ok := m.orderStatusHistory[orderID]
+	if !ok {
+		return []order.StatusHistory{}, nil
+	}
+	res := make([]order.StatusHistory, len(list))
+	copy(res, list)
+	return res, nil
+}
+
 // ---------------- Payment Methods ----------------
 
 func (m *MemoryRepository) CreatePayment(ctx context.Context, p *payment.Payment) error {
@@ -508,6 +538,7 @@ func (m *MemoryRepository) CreateExitPass(ctx context.Context, ep *exitpass.Exit
 	}
 
 	cpy := *ep
+	cpy.RawOTP = "" // Zero database/repository storage of raw OTP
 	m.exitPasses[ep.ID] = &cpy
 	m.exitPassBySession[ep.SessionID] = &cpy
 	return nil
@@ -541,13 +572,10 @@ func (m *MemoryRepository) UpdateExitPass(ctx context.Context, ep *exitpass.Exit
 	m.mu.Lock()
 	defer m.mu.Unlock()
 
-	existing, ok := m.exitPasses[ep.ID]
-	if ok && ep.RawOTP == "" && existing.RawOTP != "" {
-		ep.RawOTP = existing.RawOTP
-	}
 	ep.Version++
 	ep.UpdatedAt = time.Now()
 	cpy := *ep
+	cpy.RawOTP = "" // Zero database/repository storage of raw OTP
 	m.exitPasses[ep.ID] = &cpy
 	m.exitPassBySession[ep.SessionID] = &cpy
 	return nil
@@ -838,6 +866,7 @@ func (m *MemoryRepository) seedDefaultData() {
 	rest := &restaurant.Restaurant{
 		ID:                   restID,
 		Name:                 "The Spice Route",
+		Slug:                 "spiceroute",
 		GSTIN:                "07AABCG1234F1Z5",
 		CommissionRateBps:    100,
 		SettlementBankDetails: "HDFC Bank • A/C 50200012345678 • IFSC HDFC0000128",

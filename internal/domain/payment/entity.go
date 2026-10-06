@@ -25,6 +25,8 @@ const (
 	MethodCash             Method = "CASH"
 	MethodRestaurantPOS    Method = "RESTAURANT_POS"
 	MethodExternalPlatform Method = "EXTERNAL_PLATFORM"
+	MethodUPIQR            Method = "UPI_QR"
+	MethodPosCard          Method = "POS_CARD"
 )
 
 type State string
@@ -34,6 +36,7 @@ const (
 	StatePendingConfirmation State = "PENDING_CONFIRMATION"
 	StateConfirmed           State = "CONFIRMED"
 	StateFailed              State = "FAILED"
+	StateVoided              State = "VOIDED"
 )
 
 var AllowedPaymentTransitions = map[State][]State{
@@ -46,8 +49,11 @@ var AllowedPaymentTransitions = map[State][]State{
 		StateConfirmed,
 		StateFailed,
 	},
-	StateConfirmed: {},
-	StateFailed:    {},
+	StateConfirmed: {
+		StateVoided,
+	},
+	StateFailed: {},
+	StateVoided: {},
 }
 
 func ValidateTransition(current, target State) error {

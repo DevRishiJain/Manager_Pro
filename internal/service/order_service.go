@@ -17,6 +17,7 @@ import (
 	"github.com/devrishijain/table-manager/internal/domain/risk"
 	"github.com/devrishijain/table-manager/internal/domain/session"
 	"github.com/devrishijain/table-manager/internal/storage"
+	"github.com/devrishijain/table-manager/internal/ws"
 	"github.com/google/uuid"
 )
 
@@ -28,11 +29,16 @@ var (
 )
 
 type OrderService struct {
-	repo storage.Repository
+	repo       storage.Repository
+	dispatcher *ws.OutboxDispatcher
 }
 
 func NewOrderService(repo storage.Repository) *OrderService {
 	return &OrderService{repo: repo}
+}
+
+func (s *OrderService) SetOutboxDispatcher(d *ws.OutboxDispatcher) {
+	s.dispatcher = d
 }
 
 // PlaceOrder converts ephemeral CartItems into an immutable Order with full price/tax snapshots.
@@ -267,7 +273,25 @@ func (s *OrderService) PlaceOrder(ctx context.Context, sessionID uuid.UUID, cart
 		CreatedAt:    now,
 	})
 
+	_ = s.repo.RecordOrderStatusHistory(ctx, &order.StatusHistory{
+		ID:           uuid.New(),
+		OrderID:      newOrder.ID,
+		RestaurantID: newOrder.RestaurantID,
+		FromStatus:   "",
+		ToStatus:     newOrder.Status,
+		Reason:       "Order placed",
+		CreatedAt:    now,
+	})
+
 	newOrder.Items = orderItems
+
+	rooms := []string{
+		fmt.Sprintf("session:%s", newOrder.SessionID.String()),
+		fmt.Sprintf("restaurant:%s:floor", newOrder.RestaurantID.String()),
+		fmt.Sprintf("restaurant:%s:kitchen", newOrder.RestaurantID.String()),
+	}
+	_, _ = ws.PublishEventToRooms(ctx, s.repo, s.dispatcher, newOrder.RestaurantID, "ORDER_PLACED", rooms, newOrder.ID.String(), newOrder)
+
 	return newOrder, rawFirstOTP, nil
 }
 
@@ -282,6 +306,7 @@ func (s *OrderService) AcceptOrder(ctx context.Context, orderID, staffID uuid.UU
 		return nil, err
 	}
 
+	fromStatus := ord.Status
 	now := time.Now()
 	ord.Status = order.StateAccepted
 	ord.AcceptedAt = &now
@@ -292,6 +317,17 @@ func (s *OrderService) AcceptOrder(ctx context.Context, orderID, staffID uuid.UU
 	if err := s.repo.UpdateOrder(ctx, ord); err != nil {
 		return nil, err
 	}
+
+	_ = s.repo.RecordOrderStatusHistory(ctx, &order.StatusHistory{
+		ID:               uuid.New(),
+		OrderID:          ord.ID,
+		RestaurantID:     ord.RestaurantID,
+		FromStatus:       fromStatus,
+		ToStatus:         order.StateAccepted,
+		ChangedByStaffID: &staffID,
+		Reason:           fmt.Sprintf("Order #%d accepted by waiter", ord.SequenceNumber),
+		CreatedAt:        now,
+	})
 
 	// Auto-verify session if it was still open
 	sess, err := s.repo.GetSessionByID(ctx, ord.SessionID)
@@ -330,15 +366,12 @@ func (s *OrderService) AcceptOrder(ctx context.Context, orderID, staffID uuid.UU
 		CreatedAt:    now,
 	})
 
-	_ = s.repo.StoreOutboxEvent(ctx, &storage.OutboxEvent{
-		ID:           uuid.New(),
-		RestaurantID: ord.RestaurantID,
-		EventType:    "ORDER_ACCEPTED",
-		AggregateID:  ord.ID.String(),
-		Payload:      orderBytes,
-		Status:       storage.OutboxStatusPending,
-		CreatedAt:    now,
-	})
+	rooms := []string{
+		fmt.Sprintf("session:%s", ord.SessionID.String()),
+		fmt.Sprintf("restaurant:%s:floor", ord.RestaurantID.String()),
+		fmt.Sprintf("restaurant:%s:kitchen", ord.RestaurantID.String()),
+	}
+	_, _ = ws.PublishEventToRooms(ctx, s.repo, s.dispatcher, ord.RestaurantID, "ORDER_ACCEPTED", rooms, ord.ID.String(), ord)
 
 	s.depleteOrderIngredients(ctx, ord)
 
@@ -356,12 +389,24 @@ func (s *OrderService) UpdateOrderStatus(ctx context.Context, orderID uuid.UUID,
 		return nil, err
 	}
 
+	fromStatus := ord.Status
 	now := time.Now()
 	ord.Status = targetState
 	ord.UpdatedAt = now
 	if err := s.repo.UpdateOrder(ctx, ord); err != nil {
 		return nil, err
 	}
+
+	_ = s.repo.RecordOrderStatusHistory(ctx, &order.StatusHistory{
+		ID:               uuid.New(),
+		OrderID:          ord.ID,
+		RestaurantID:     ord.RestaurantID,
+		FromStatus:       fromStatus,
+		ToStatus:         targetState,
+		ChangedByStaffID: &staffID,
+		Reason:           fmt.Sprintf("Kitchen status updated to %s", targetState),
+		CreatedAt:        now,
+	})
 
 	if targetState == order.StateAccepted || targetState == order.StatePreparing {
 		s.depleteOrderIngredients(ctx, ord)
@@ -379,6 +424,13 @@ func (s *OrderService) UpdateOrderStatus(ctx context.Context, orderID uuid.UUID,
 		CreatedAt:    now,
 	})
 
+	rooms := []string{
+		fmt.Sprintf("session:%s", ord.SessionID.String()),
+		fmt.Sprintf("restaurant:%s:floor", ord.RestaurantID.String()),
+		fmt.Sprintf("restaurant:%s:kitchen", ord.RestaurantID.String()),
+	}
+	_, _ = ws.PublishEventToRooms(ctx, s.repo, s.dispatcher, ord.RestaurantID, "ORDER_STATUS_CHANGED", rooms, ord.ID.String(), ord)
+
 	return ord, nil
 }
 
@@ -393,6 +445,7 @@ func (s *OrderService) CancelOrder(ctx context.Context, orderID, actorID uuid.UU
 		return nil, err
 	}
 
+	fromStatus := ord.Status
 	now := time.Now()
 	var stage order.CancellationStage
 	switch ord.Status {
@@ -413,6 +466,21 @@ func (s *OrderService) CancelOrder(ctx context.Context, orderID, actorID uuid.UU
 	if err := s.repo.UpdateOrder(ctx, ord); err != nil {
 		return nil, err
 	}
+
+	var staffIDPtr *uuid.UUID
+	if actorType == audit.ActorTypeStaff && actorID != uuid.Nil {
+		staffIDPtr = &actorID
+	}
+	_ = s.repo.RecordOrderStatusHistory(ctx, &order.StatusHistory{
+		ID:               uuid.New(),
+		OrderID:          ord.ID,
+		RestaurantID:     ord.RestaurantID,
+		FromStatus:       fromStatus,
+		ToStatus:         order.StateCancelled,
+		ChangedByStaffID: staffIDPtr,
+		Reason:           reason,
+		CreatedAt:        now,
+	})
 
 	// Roll back session running total for PRE_ACCEPTANCE and POST_ACCEPTANCE_PRE_PREP
 	// For POST_PREP_START: platform fee still applies so GMV is retained!
@@ -463,15 +531,12 @@ func (s *OrderService) CancelOrder(ctx context.Context, orderID, actorID uuid.UU
 		CreatedAt:    now,
 	})
 
-	_ = s.repo.StoreOutboxEvent(ctx, &storage.OutboxEvent{
-		ID:           uuid.New(),
-		RestaurantID: ord.RestaurantID,
-		EventType:    "ORDER_CANCELLED",
-		AggregateID:  ord.ID.String(),
-		Payload:      orderBytes,
-		Status:       storage.OutboxStatusPending,
-		CreatedAt:    now,
-	})
+	rooms := []string{
+		fmt.Sprintf("session:%s", ord.SessionID.String()),
+		fmt.Sprintf("restaurant:%s:floor", ord.RestaurantID.String()),
+		fmt.Sprintf("restaurant:%s:kitchen", ord.RestaurantID.String()),
+	}
+	_, _ = ws.PublishEventToRooms(ctx, s.repo, s.dispatcher, ord.RestaurantID, "ORDER_CANCELLED", rooms, ord.ID.String(), ord)
 
 	return ord, nil
 }

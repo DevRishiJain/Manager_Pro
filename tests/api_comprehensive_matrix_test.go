@@ -552,8 +552,9 @@ func TestComprehensiveAPIMatrix(t *testing.T) {
 		}
 
 		// Worst case: Guard role unauthorized for kitchen queue
+		// (§Phase 5.2: kitchen now requires strict StaffAuth; guard tokens are rejected with 401 before RequireRole 403)
 		recWorst := doRequest("GET", "/api/v1/kitchen/orders/queue", nil, map[string]string{"Authorization": "Bearer " + guardToken})
-		worstPass := recWorst.Code == http.StatusForbidden || recWorst.Code == http.StatusOK || recWorst.Code == http.StatusBadRequest
+		worstPass := recWorst.Code == http.StatusForbidden || recWorst.Code == http.StatusUnauthorized || recWorst.Code == http.StatusOK || recWorst.Code == http.StatusBadRequest
 
 		status := "PASS"
 		if !happyPass || !dbVerified || !worstPass {
@@ -563,11 +564,11 @@ func TestComprehensiveAPIMatrix(t *testing.T) {
 			Module:            "Kitchen Display (KDS)",
 			Route:             "/api/v1/kitchen/orders/queue",
 			Method:            "GET",
-			Description:       "Retrieves active queue of accepted and preparing food orders for KDS display",
+			Description:       "Retrieves active queue of accepted and preparing food orders for KDS display (§Phase 5.2: strict StaffAuth)",
 			HappyStatus:       rec.Code,
 			HappyPass:         happyPass,
 			DBVerified:        dbVerified,
-			WorstCaseScenario: "Waiter role accessing Kitchen Queue -> 403 Forbidden",
+			WorstCaseScenario: "Guard role accessing Kitchen Queue -> 401/403 Unauthorized/Forbidden",
 			WorstStatus:       recWorst.Code,
 			WorstPass:         worstPass,
 			OverallWorking:    status,

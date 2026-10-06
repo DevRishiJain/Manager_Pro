@@ -2,27 +2,52 @@ package api
 
 import (
 	"net/http"
+	"time"
 
 	"github.com/devrishijain/table-manager/internal/api/handlers"
 	"github.com/devrishijain/table-manager/internal/api/middleware"
 	"github.com/devrishijain/table-manager/internal/storage"
+	"github.com/devrishijain/table-manager/internal/ws"
 	"github.com/go-chi/chi/v5"
 	chimw "github.com/go-chi/chi/v5/middleware"
 )
 
-func NewRouter(handler *handlers.APIHandler, repo storage.Repository, jwtSecret []byte) http.Handler {
+func NewRouter(handler *handlers.APIHandler, repo storage.Repository, jwtSecret []byte, wsServerOpt ...*ws.Server) http.Handler {
+	var wsServer *ws.Server
+	if len(wsServerOpt) > 0 && wsServerOpt[0] != nil {
+		wsServer = wsServerOpt[0]
+	} else {
+		wsTM := handler.GetWSTicketManager()
+		if wsTM == nil {
+			wsTM = ws.NewTicketManager(30 * time.Second)
+			handler.SetWSTicketManager(wsTM)
+		}
+		hub := ws.NewHub()
+		wsServer = ws.NewServer(hub, wsTM, []string{"*"})
+	}
+
 	r := chi.NewRouter()
 
 	// Global Middlewares
+	r.Use(middleware.CORSMiddleware)
+	r.Use(middleware.RequestMetricsMiddleware(middleware.GlobalMetrics))
 	r.Use(middleware.CorrelationMiddleware)
 	r.Use(middleware.SecurityHeadersMiddleware)
 	r.Use(chimw.RequestID)
 	r.Use(chimw.RealIP)
 	r.Use(chimw.Logger)
 	r.Use(chimw.Recoverer)
+	r.Use(chimw.Compress(5))
+	r.Use(middleware.ETagMiddleware)
 
 	idempotencyMgr := middleware.NewIdempotencyManager()
 	r.Use(idempotencyMgr.Middleware())
+
+	// Metrics endpoint
+	r.Get("/metrics", middleware.MetricsHandler(middleware.GlobalMetrics))
+
+	// Real-Time WebSocket endpoint (§Phase 2)
+	r.Get("/ws/v1", wsServer.ServeHTTP)
 
 	// Health Check & Root Handlers
 	r.Get("/healthz", func(w http.ResponseWriter, r *http.Request) {
@@ -37,6 +62,9 @@ func NewRouter(handler *handlers.APIHandler, repo storage.Repository, jwtSecret 
 	})
 
 	r.Route("/api/v1", func(api chi.Router) {
+		// WebSocket Ticket Authentication (§Phase 2.1)
+		api.Post("/ws/ticket", handler.GetWSTicket)
+
 		// Public routes
 		api.Post("/session/start", handler.StartSession)
 		api.Get("/public/restaurant/check-handle", handler.CheckHandleAvailability)
@@ -73,14 +101,16 @@ func NewRouter(handler *handlers.APIHandler, repo storage.Repository, jwtSecret 
 			sr.Post("/staff/orders/{id}/cancel", handler.CancelOrder)
 			sr.Post("/staff/payments/{id}/confirm", handler.StaffConfirmPayment)
 			sr.Post("/staff/payments/confirm", handler.StaffConfirmPayment)
+			sr.Post("/staff/payments/{id}/void", handler.StaffVoidPayment)
 			sr.Post("/staff/sessions/{id}/force-close", handler.ForceCloseSession)
 			sr.Post("/staff/sessions/{id}/assistance/dismiss", handler.DismissAssistance)
 			sr.Get("/staff/dashboard/tables", handler.GetTableDashboard)
 		})
 
-		// Kitchen (KDS) routes
+		// Kitchen (KDS) routes (§Phase 5.2 Hardening)
 		api.Group(func(kr chi.Router) {
-			kr.Use(middleware.StaffAuthOptional(jwtSecret))
+			kr.Use(middleware.StaffAuth(jwtSecret))
+			kr.Use(middleware.RequireRole("KITCHEN", "WAITER", "MANAGER", "RESTAURANT_ADMIN", "RESTAURANT_OWNER"))
 			kr.Get("/kitchen/orders/queue", handler.GetKitchenQueue)
 			kr.Post("/kitchen/orders/{id}/status", handler.UpdateKitchenStatus)
 		})
@@ -147,6 +177,7 @@ func NewRouter(handler *handlers.APIHandler, repo storage.Repository, jwtSecret 
 			// Tables Management
 			tr.Get("/restaurant/tables", handler.ListTables)
 			tr.Post("/restaurant/tables", handler.CreateTable)
+			tr.Post("/restaurant/tables/generate-token", handler.GenerateTableToken)
 
 			// Staff Management
 			tr.Get("/restaurant/staff", handler.ListStaff)

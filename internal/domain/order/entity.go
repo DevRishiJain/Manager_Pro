@@ -138,3 +138,14 @@ type CartItem struct {
 	Quantity            int       `json:"quantity"`
 	SpecialInstructions string    `json:"special_instructions,omitempty"`
 }
+
+type StatusHistory struct {
+	ID               uuid.UUID  `json:"id"`
+	OrderID          uuid.UUID  `json:"order_id"`
+	RestaurantID     uuid.UUID  `json:"restaurant_id"`
+	FromStatus       State      `json:"from_status"`
+	ToStatus         State      `json:"to_status"`
+	ChangedByStaffID *uuid.UUID `json:"changed_by_staff_id,omitempty"`
+	Reason           string     `json:"reason,omitempty"`
+	CreatedAt        time.Time  `json:"created_at"`
+}

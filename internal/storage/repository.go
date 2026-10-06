@@ -38,6 +38,7 @@ type OutboxEvent struct {
 	ID                  uuid.UUID       `json:"id"`
 	RestaurantID        uuid.UUID       `json:"restaurant_id"`
 	EventType           string          `json:"event_type"` // e.g. "ORDER_ACCEPTED", "PAYMENT_CONFIRMED", "EXIT_VERIFIED"
+	Room                string          `json:"room,omitempty"`
 	AggregateID         string          `json:"aggregate_id"`
 	Payload             json.RawMessage `json:"payload"`
 	Status              OutboxStatus    `json:"status"`
@@ -69,6 +70,8 @@ type Repository interface {
 	ListKitchenQueue(ctx context.Context, restaurantID uuid.UUID, statuses []order.State) ([]order.Order, error)
 	ListPendingOrders(ctx context.Context, restaurantID uuid.UUID) ([]order.Order, error)
 	ListOrders(ctx context.Context, restaurantID uuid.UUID, limit int, startDate, endDate *time.Time) ([]order.Order, error)
+	RecordOrderStatusHistory(ctx context.Context, h *order.StatusHistory) error
+	GetOrderStatusHistory(ctx context.Context, orderID uuid.UUID) ([]order.StatusHistory, error)
 
 	// Payment
 	CreatePayment(ctx context.Context, p *payment.Payment) error
@@ -167,4 +170,34 @@ type Repository interface {
 	GetRecipeIngredientsByMenuItemID(ctx context.Context, restaurantID, menuItemID uuid.UUID) ([]inventory.RecipeIngredient, error)
 	ListDishMargins(ctx context.Context, restaurantID uuid.UUID) ([]inventory.DishMargin, error)
 	ListRecipeIngredientsForOrder(ctx context.Context, orderID uuid.UUID) ([]inventory.OrderIngredientRequirement, error)
+}
+
+type queryCounterKey struct{}
+
+var QueryCounterKey = queryCounterKey{}
+
+type QueryCounter struct {
+	count int64
+}
+
+func (q *QueryCounter) Inc() {
+	if q != nil {
+		q.count++
+	}
+}
+
+func (q *QueryCounter) Value() int64 {
+	if q == nil {
+		return 0
+	}
+	return q.count
+}
+
+func RecordQuery(ctx context.Context) {
+	if ctx == nil {
+		return
+	}
+	if c, ok := ctx.Value(QueryCounterKey).(*QueryCounter); ok && c != nil {
+		c.Inc()
+	}
 }
