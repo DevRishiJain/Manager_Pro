@@ -81,6 +81,9 @@ type MemoryRepository struct {
 	inventoryItems    map[uuid.UUID]*inventory.InventoryItem
 	inventoryLogs     map[uuid.UUID]*inventory.InventoryLog
 	recipeIngredients map[uuid.UUID][]inventory.RecipeIngredient
+
+	passwordTokens     map[string]*storage.PasswordResetToken
+	passwordTokensByID map[uuid.UUID]*storage.PasswordResetToken
 }
 
 func NewMemoryRepository() *MemoryRepository {
@@ -121,6 +124,9 @@ func NewMemoryRepository() *MemoryRepository {
 		inventoryItems:    make(map[uuid.UUID]*inventory.InventoryItem),
 		inventoryLogs:     make(map[uuid.UUID]*inventory.InventoryLog),
 		recipeIngredients: make(map[uuid.UUID][]inventory.RecipeIngredient),
+
+		passwordTokens:     make(map[string]*storage.PasswordResetToken),
+		passwordTokensByID: make(map[uuid.UUID]*storage.PasswordResetToken),
 	}
 	repo.seedDefaultData()
 	return repo
@@ -1780,3 +1786,38 @@ func (m *MemoryRepository) ListRecipeIngredientsForOrder(ctx context.Context, or
 	}
 	return result, nil
 }
+
+// ---------------- Password Resets ----------------
+
+func (m *MemoryRepository) StorePasswordResetToken(ctx context.Context, token *storage.PasswordResetToken) error {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	cp := *token
+	m.passwordTokens[token.TokenHash] = &cp
+	m.passwordTokensByID[token.ID] = &cp
+	return nil
+}
+
+func (m *MemoryRepository) GetPasswordResetToken(ctx context.Context, tokenHash string) (*storage.PasswordResetToken, error) {
+	m.mu.RLock()
+	defer m.mu.RUnlock()
+	t, ok := m.passwordTokens[tokenHash]
+	if !ok {
+		return nil, ErrNotFound
+	}
+	cp := *t
+	return &cp, nil
+}
+
+func (m *MemoryRepository) MarkPasswordResetTokenUsed(ctx context.Context, id uuid.UUID) error {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	t, ok := m.passwordTokensByID[id]
+	if !ok {
+		return ErrNotFound
+	}
+	now := time.Now().UTC()
+	t.UsedAt = &now
+	return nil
+}
+

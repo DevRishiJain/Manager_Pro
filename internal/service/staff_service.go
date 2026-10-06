@@ -2,6 +2,9 @@ package service
 
 import (
 	"context"
+	"crypto/rand"
+	"crypto/sha256"
+	"encoding/hex"
 	"errors"
 	"fmt"
 	"strings"
@@ -322,3 +325,122 @@ func (s *StaffService) UpdateStaffPassword(ctx context.Context, staffID uuid.UUI
 
 	return nil
 }
+
+type RequestPasswordResetResult struct {
+	ResetToken string `json:"reset_token,omitempty"`
+}
+
+func (s *StaffService) RequestPasswordReset(ctx context.Context, identifier string, restaurantID *uuid.UUID) (*RequestPasswordResetResult, error) {
+	ident := strings.TrimSpace(identifier)
+	if ident == "" {
+		return nil, errors.New("identifier (email or employee ID) is required")
+	}
+
+	var staff *restaurant.StaffUser
+	var err error
+
+	if strings.Contains(ident, "@") {
+		staff, err = s.repo.GetStaffByEmail(ctx, strings.ToLower(ident))
+	} else if restaurantID != nil {
+		staff, err = s.repo.GetStaffByEmployeeID(ctx, *restaurantID, strings.ToUpper(ident))
+	}
+
+	if err != nil || staff == nil || !staff.IsActive {
+		// Generic response to prevent user enumeration
+		return &RequestPasswordResetResult{}, nil
+	}
+
+	tokenBytes := make([]byte, 32)
+	if _, err := rand.Read(tokenBytes); err != nil {
+		return nil, errors.New("failed to generate reset token")
+	}
+	rawToken := hex.EncodeToString(tokenBytes)
+
+	hasher := sha256.New()
+	hasher.Write([]byte(rawToken))
+	tokenHash := hex.EncodeToString(hasher.Sum(nil))
+
+	now := time.Now().UTC()
+	resetRecord := &storage.PasswordResetToken{
+		ID:        uuid.New(),
+		StaffID:   staff.ID,
+		TokenHash: tokenHash,
+		ExpiresAt: now.Add(15 * time.Minute),
+		CreatedAt: now,
+	}
+
+	if err := s.repo.StorePasswordResetToken(ctx, resetRecord); err != nil {
+		return nil, errors.New("failed to store reset token")
+	}
+
+	_ = s.repo.AppendAuditLog(ctx, &audit.AuditLog{
+		ID:           uuid.New(),
+		ActorType:    audit.ActorTypeStaff,
+		ActorID:      staff.ID.String(),
+		RestaurantID: staff.RestaurantID,
+		Action:       "PASSWORD_RESET_REQUESTED",
+		CreatedAt:    now,
+	})
+
+	return &RequestPasswordResetResult{
+		ResetToken: rawToken,
+	}, nil
+}
+
+func (s *StaffService) ResetPassword(ctx context.Context, rawToken string, newPassword string) error {
+	trimmedPassword := strings.TrimSpace(newPassword)
+	if len(trimmedPassword) < 6 {
+		return errors.New("password must be at least 6 characters")
+	}
+	if strings.TrimSpace(rawToken) == "" {
+		return errors.New("reset token is required")
+	}
+
+	hasher := sha256.New()
+	hasher.Write([]byte(strings.TrimSpace(rawToken)))
+	tokenHash := hex.EncodeToString(hasher.Sum(nil))
+
+	resetRecord, err := s.repo.GetPasswordResetToken(ctx, tokenHash)
+	if err != nil || resetRecord == nil {
+		return errors.New("invalid or expired reset token")
+	}
+
+	if resetRecord.UsedAt != nil {
+		return errors.New("reset token has already been used")
+	}
+
+	if time.Now().UTC().After(resetRecord.ExpiresAt) {
+		return errors.New("reset token has expired")
+	}
+
+	hash, err := bcrypt.GenerateFromPassword([]byte(trimmedPassword), bcrypt.DefaultCost)
+	if err != nil {
+		return fmt.Errorf("failed to hash new password: %w", err)
+	}
+
+	if err := s.repo.UpdateStaffPassword(ctx, resetRecord.StaffID, string(hash)); err != nil {
+		return err
+	}
+
+	if err := s.repo.MarkPasswordResetTokenUsed(ctx, resetRecord.ID); err != nil {
+		return err
+	}
+
+	staff, _ := s.repo.GetStaffByID(ctx, resetRecord.StaffID)
+	restID := uuid.Nil
+	if staff != nil {
+		restID = staff.RestaurantID
+	}
+
+	_ = s.repo.AppendAuditLog(ctx, &audit.AuditLog{
+		ID:           uuid.New(),
+		ActorType:    audit.ActorTypeStaff,
+		ActorID:      resetRecord.StaffID.String(),
+		RestaurantID: restID,
+		Action:       "PASSWORD_RESET_COMPLETED",
+		CreatedAt:    time.Now().UTC(),
+	})
+
+	return nil
+}
+

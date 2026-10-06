@@ -1526,6 +1526,64 @@ func (h *APIHandler) StaffLogin(w http.ResponseWriter, r *http.Request) {
 	jsonResponse(w, http.StatusOK, result)
 }
 
+type ForgotPasswordRequest struct {
+	Identifier   string `json:"identifier"`
+	RestaurantID string `json:"restaurant_id,omitempty"`
+}
+
+func (h *APIHandler) ForgotPassword(w http.ResponseWriter, r *http.Request) {
+	var req ForgotPasswordRequest
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		errorResponse(w, http.StatusBadRequest, "invalid request payload")
+		return
+	}
+
+	var restID *uuid.UUID
+	trimmedRest := strings.TrimSpace(req.RestaurantID)
+	if trimmedRest != "" {
+		if parsed, err := uuid.Parse(trimmedRest); err == nil && parsed != uuid.Nil {
+			restID = &parsed
+		} else {
+			if rest, err := h.repo.GetRestaurantBySlug(r.Context(), trimmedRest); err == nil && rest != nil {
+				restID = &rest.ID
+			}
+		}
+	}
+
+	res, err := h.getStaffService().RequestPasswordReset(r.Context(), req.Identifier, restID)
+	if err != nil {
+		errorResponse(w, http.StatusBadRequest, err.Error())
+		return
+	}
+
+	jsonResponse(w, http.StatusOK, map[string]interface{}{
+		"message":     "If an active matching account was found, password reset instructions have been processed.",
+		"reset_token": res.ResetToken,
+	})
+}
+
+type ResetPasswordRequest struct {
+	Token       string `json:"token"`
+	NewPassword string `json:"new_password"`
+}
+
+func (h *APIHandler) ResetPassword(w http.ResponseWriter, r *http.Request) {
+	var req ResetPasswordRequest
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		errorResponse(w, http.StatusBadRequest, "invalid request payload")
+		return
+	}
+
+	if err := h.getStaffService().ResetPassword(r.Context(), req.Token, req.NewPassword); err != nil {
+		errorResponse(w, http.StatusBadRequest, err.Error())
+		return
+	}
+
+	jsonResponse(w, http.StatusOK, map[string]string{
+		"message": "Password successfully reset. You may now log in with your new password.",
+	})
+}
+
 type StaffStartSessionRequest struct {
 	TableID        string `json:"table_id,omitempty"`
 	TableNumber    string `json:"table_number,omitempty"`

@@ -475,6 +475,21 @@ func (tr *TrackedRepository) ListDishMargins(ctx context.Context, restaurantID u
 	return tr.underlying.ListDishMargins(ctx, restaurantID)
 }
 
+func (tr *TrackedRepository) StorePasswordResetToken(ctx context.Context, token *PasswordResetToken) error {
+	RecordQuery(ctx)
+	return tr.underlying.StorePasswordResetToken(ctx, token)
+}
+
+func (tr *TrackedRepository) GetPasswordResetToken(ctx context.Context, tokenHash string) (*PasswordResetToken, error) {
+	RecordQuery(ctx)
+	return tr.underlying.GetPasswordResetToken(ctx, tokenHash)
+}
+
+func (tr *TrackedRepository) MarkPasswordResetTokenUsed(ctx context.Context, id uuid.UUID) error {
+	RecordQuery(ctx)
+	return tr.underlying.MarkPasswordResetTokenUsed(ctx, id)
+}
+
 func (tr *TrackedRepository) ListRecipeIngredientsForOrder(ctx context.Context, orderID uuid.UUID) ([]inventory.OrderIngredientRequirement, error) {
 	RecordQuery(ctx)
 	return tr.underlying.ListRecipeIngredientsForOrder(ctx, orderID)

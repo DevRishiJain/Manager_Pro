@@ -2127,5 +2127,53 @@ func (r *PostgresRepository) ListRecipeIngredientsForOrder(ctx context.Context, 
 	return reqs, rows.Err()
 }
 
+// ---------------- Password Resets ----------------
+
+func (r *PostgresRepository) StorePasswordResetToken(ctx context.Context, token *storage.PasswordResetToken) error {
+	_ = r.mem.StorePasswordResetToken(ctx, token)
+	if r.pool != nil {
+		_, err := r.pool.Exec(ctx, `
+			INSERT INTO password_reset_tokens (id, staff_id, token_hash, expires_at, used_at, created_at)
+			VALUES ($1, $2, $3, $4, $5, $6);
+		`, token.ID, token.StaffID, token.TokenHash, token.ExpiresAt, token.UsedAt, token.CreatedAt)
+		if err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+func (r *PostgresRepository) GetPasswordResetToken(ctx context.Context, tokenHash string) (*storage.PasswordResetToken, error) {
+	if r.pool != nil {
+		var t storage.PasswordResetToken
+		err := r.pool.QueryRow(ctx, `
+			SELECT id, staff_id, token_hash, expires_at, used_at, created_at
+			FROM password_reset_tokens
+			WHERE token_hash = $1;
+		`, tokenHash).Scan(&t.ID, &t.StaffID, &t.TokenHash, &t.ExpiresAt, &t.UsedAt, &t.CreatedAt)
+		if err == nil {
+			return &t, nil
+		}
+	}
+	return r.mem.GetPasswordResetToken(ctx, tokenHash)
+}
+
+func (r *PostgresRepository) MarkPasswordResetTokenUsed(ctx context.Context, id uuid.UUID) error {
+	_ = r.mem.MarkPasswordResetTokenUsed(ctx, id)
+	if r.pool != nil {
+		now := time.Now().UTC()
+		_, err := r.pool.Exec(ctx, `
+			UPDATE password_reset_tokens
+			SET used_at = $1
+			WHERE id = $2;
+		`, now, id)
+		if err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
 // Ensure interface compliance
 var _ storage.Repository = (*PostgresRepository)(nil)
+

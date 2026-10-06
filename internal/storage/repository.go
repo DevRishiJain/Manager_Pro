@@ -171,6 +171,20 @@ type Repository interface {
 	GetRecipeIngredientsByMenuItemID(ctx context.Context, restaurantID, menuItemID uuid.UUID) ([]inventory.RecipeIngredient, error)
 	ListDishMargins(ctx context.Context, restaurantID uuid.UUID) ([]inventory.DishMargin, error)
 	ListRecipeIngredientsForOrder(ctx context.Context, orderID uuid.UUID) ([]inventory.OrderIngredientRequirement, error)
+
+	// Password Resets
+	StorePasswordResetToken(ctx context.Context, token *PasswordResetToken) error
+	GetPasswordResetToken(ctx context.Context, tokenHash string) (*PasswordResetToken, error)
+	MarkPasswordResetTokenUsed(ctx context.Context, id uuid.UUID) error
+}
+
+type PasswordResetToken struct {
+	ID        uuid.UUID  `json:"id"`
+	StaffID   uuid.UUID  `json:"staff_id"`
+	TokenHash string     `json:"token_hash"`
+	ExpiresAt time.Time  `json:"expires_at"`
+	UsedAt    *time.Time `json:"used_at,omitempty"`
+	CreatedAt time.Time  `json:"created_at"`
 }
 
 type queryCounterKey struct{}
