@@ -9,8 +9,8 @@ import (
 	"sync"
 	"time"
 
-	"golang.org/x/crypto/bcrypt"
 	"github.com/devrishijain/table-manager/internal/domain/money"
+	"golang.org/x/crypto/bcrypt"
 
 	"github.com/devrishijain/table-manager/internal/domain/audit"
 	"github.com/devrishijain/table-manager/internal/domain/exitpass"
@@ -26,23 +26,23 @@ import (
 )
 
 var (
-	ErrNotFound           = storage.ErrNotFound
+	ErrNotFound            = storage.ErrNotFound
 	ErrActiveSessionExists = storage.ErrActiveSessionExists
 	ErrOptimisticLock      = storage.ErrOptimisticLock
-	ErrDuplicateKey       = errors.New("duplicate key violation")
+	ErrDuplicateKey        = errors.New("duplicate key violation")
 )
 
 type MemoryRepository struct {
 	mu sync.RWMutex
 
-	restaurants   map[uuid.UUID]*restaurant.Restaurant
-	tables        map[uuid.UUID]*restaurant.Table
-	tablesByToken map[string]*restaurant.Table
+	restaurants       map[uuid.UUID]*restaurant.Restaurant
+	tables            map[uuid.UUID]*restaurant.Table
+	tablesByToken     map[string]*restaurant.Table
 	staff             map[uuid.UUID]*restaurant.StaffUser
 	staffByEmail      map[string]*restaurant.StaffUser
 	staffByEmployeeID map[string]*restaurant.StaffUser
 	guards            map[uuid.UUID]*restaurant.GuardUser
-	guardsByPhone map[string]*restaurant.GuardUser
+	guardsByPhone     map[string]*restaurant.GuardUser
 
 	categories map[uuid.UUID]*restaurant.MenuCategory
 	menuItems  map[uuid.UUID]*restaurant.MenuItem
@@ -50,9 +50,9 @@ type MemoryRepository struct {
 	settings   map[uuid.UUID]*restaurant.RestaurantSettings
 	onboarding map[uuid.UUID]*restaurant.RestaurantOnboarding
 
-	sessions         map[uuid.UUID]*session.DiningSession
-	sessionsByToken  map[string]*session.DiningSession
-	participants     map[uuid.UUID][]session.SessionParticipant
+	sessions        map[uuid.UUID]*session.DiningSession
+	sessionsByToken map[string]*session.DiningSession
+	participants    map[uuid.UUID][]session.SessionParticipant
 
 	orders             map[uuid.UUID]*order.Order
 	orderItems         map[uuid.UUID][]order.OrderItem
@@ -62,7 +62,7 @@ type MemoryRepository struct {
 	refunds     map[uuid.UUID][]payment.Refund
 	adjustments map[uuid.UUID][]payment.Adjustment
 
-	exitPasses       map[uuid.UUID]*exitpass.ExitPass
+	exitPasses        map[uuid.UUID]*exitpass.ExitPass
 	exitPassBySession map[uuid.UUID]*exitpass.ExitPass
 
 	platformFees map[uuid.UUID]*ledger.PlatformFeeLedgerEntry
@@ -84,49 +84,61 @@ type MemoryRepository struct {
 
 	passwordTokens     map[string]*storage.PasswordResetToken
 	passwordTokensByID map[uuid.UUID]*storage.PasswordResetToken
+
+	menuItemVariants     map[uuid.UUID][]restaurant.MenuItemVariant
+	variantsByID         map[uuid.UUID]*restaurant.MenuItemVariant
+	subscriptionOTPs     map[uuid.UUID]*restaurant.SubscriptionOTP
+	franchises           map[uuid.UUID]*restaurant.Franchise
+	franchiseInviteCodes map[string]*restaurant.FranchiseInviteCode
 }
 
 func NewMemoryRepository() *MemoryRepository {
 	repo := &MemoryRepository{
-		restaurants:       make(map[uuid.UUID]*restaurant.Restaurant),
-		tables:            make(map[uuid.UUID]*restaurant.Table),
-		tablesByToken:     make(map[string]*restaurant.Table),
-		staff:             make(map[uuid.UUID]*restaurant.StaffUser),
-		staffByEmail:      make(map[string]*restaurant.StaffUser),
-		staffByEmployeeID: make(map[string]*restaurant.StaffUser),
-		guards:            make(map[uuid.UUID]*restaurant.GuardUser),
-		guardsByPhone:     make(map[string]*restaurant.GuardUser),
-		categories:        make(map[uuid.UUID]*restaurant.MenuCategory),
-		menuItems:         make(map[uuid.UUID]*restaurant.MenuItem),
-		settings:          make(map[uuid.UUID]*restaurant.RestaurantSettings),
-		onboarding:        make(map[uuid.UUID]*restaurant.RestaurantOnboarding),
-		sessions:          make(map[uuid.UUID]*session.DiningSession),
-		sessionsByToken:   make(map[string]*session.DiningSession),
-		participants:      make(map[uuid.UUID][]session.SessionParticipant),
+		restaurants:        make(map[uuid.UUID]*restaurant.Restaurant),
+		tables:             make(map[uuid.UUID]*restaurant.Table),
+		tablesByToken:      make(map[string]*restaurant.Table),
+		staff:              make(map[uuid.UUID]*restaurant.StaffUser),
+		staffByEmail:       make(map[string]*restaurant.StaffUser),
+		staffByEmployeeID:  make(map[string]*restaurant.StaffUser),
+		guards:             make(map[uuid.UUID]*restaurant.GuardUser),
+		guardsByPhone:      make(map[string]*restaurant.GuardUser),
+		categories:         make(map[uuid.UUID]*restaurant.MenuCategory),
+		menuItems:          make(map[uuid.UUID]*restaurant.MenuItem),
+		settings:           make(map[uuid.UUID]*restaurant.RestaurantSettings),
+		onboarding:         make(map[uuid.UUID]*restaurant.RestaurantOnboarding),
+		sessions:           make(map[uuid.UUID]*session.DiningSession),
+		sessionsByToken:    make(map[string]*session.DiningSession),
+		participants:       make(map[uuid.UUID][]session.SessionParticipant),
 		orders:             make(map[uuid.UUID]*order.Order),
 		orderItems:         make(map[uuid.UUID][]order.OrderItem),
 		orderStatusHistory: make(map[uuid.UUID][]order.StatusHistory),
-		payments:          make(map[uuid.UUID]*payment.Payment),
-		refunds:           make(map[uuid.UUID][]payment.Refund),
-		adjustments:       make(map[uuid.UUID][]payment.Adjustment),
-		exitPasses:        make(map[uuid.UUID]*exitpass.ExitPass),
-		exitPassBySession: make(map[uuid.UUID]*exitpass.ExitPass),
-		platformFees:      make(map[uuid.UUID]*ledger.PlatformFeeLedgerEntry),
-		feeBySession:      make(map[uuid.UUID]*ledger.PlatformFeeLedgerEntry),
-		refundAdjs:        make(map[uuid.UUID]*ledger.RefundAdjustment),
-		settlements:       make(map[uuid.UUID]*ledger.RestaurantSettlement),
-		auditLogs:         make([]audit.AuditLog, 0),
-		staffActions:      make([]audit.StaffAction, 0),
-		outboxEvents:      make(map[uuid.UUID]*storage.OutboxEvent),
-		webhookEvents:     make(map[string]time.Time),
-		expenses:          make(map[uuid.UUID]*expense.Expense),
-		expenseLineItems:  make(map[uuid.UUID][]expense.ExpenseLineItem),
-		inventoryItems:    make(map[uuid.UUID]*inventory.InventoryItem),
-		inventoryLogs:     make(map[uuid.UUID]*inventory.InventoryLog),
-		recipeIngredients: make(map[uuid.UUID][]inventory.RecipeIngredient),
+		payments:           make(map[uuid.UUID]*payment.Payment),
+		refunds:            make(map[uuid.UUID][]payment.Refund),
+		adjustments:        make(map[uuid.UUID][]payment.Adjustment),
+		exitPasses:         make(map[uuid.UUID]*exitpass.ExitPass),
+		exitPassBySession:  make(map[uuid.UUID]*exitpass.ExitPass),
+		platformFees:       make(map[uuid.UUID]*ledger.PlatformFeeLedgerEntry),
+		feeBySession:       make(map[uuid.UUID]*ledger.PlatformFeeLedgerEntry),
+		refundAdjs:         make(map[uuid.UUID]*ledger.RefundAdjustment),
+		settlements:        make(map[uuid.UUID]*ledger.RestaurantSettlement),
+		auditLogs:          make([]audit.AuditLog, 0),
+		staffActions:       make([]audit.StaffAction, 0),
+		outboxEvents:       make(map[uuid.UUID]*storage.OutboxEvent),
+		webhookEvents:      make(map[string]time.Time),
+		expenses:           make(map[uuid.UUID]*expense.Expense),
+		expenseLineItems:   make(map[uuid.UUID][]expense.ExpenseLineItem),
+		inventoryItems:     make(map[uuid.UUID]*inventory.InventoryItem),
+		inventoryLogs:      make(map[uuid.UUID]*inventory.InventoryLog),
+		recipeIngredients:  make(map[uuid.UUID][]inventory.RecipeIngredient),
 
 		passwordTokens:     make(map[string]*storage.PasswordResetToken),
 		passwordTokensByID: make(map[uuid.UUID]*storage.PasswordResetToken),
+
+		menuItemVariants:     make(map[uuid.UUID][]restaurant.MenuItemVariant),
+		variantsByID:         make(map[uuid.UUID]*restaurant.MenuItemVariant),
+		subscriptionOTPs:     make(map[uuid.UUID]*restaurant.SubscriptionOTP),
+		franchises:           make(map[uuid.UUID]*restaurant.Franchise),
+		franchiseInviteCodes: make(map[string]*restaurant.FranchiseInviteCode),
 	}
 	repo.seedDefaultData()
 	return repo
@@ -672,6 +684,19 @@ func (m *MemoryRepository) CreateRestaurant(ctx context.Context, r *restaurant.R
 	return nil
 }
 
+// fillRestaurant populates derived franchise fields on a restaurant copy.
+// Caller must hold at least a read lock.
+func (m *MemoryRepository) fillRestaurant(r *restaurant.Restaurant) {
+	if r.FranchiseID != nil {
+		if f, ok := m.franchises[*r.FranchiseID]; ok {
+			r.FranchiseName = f.Name
+		}
+		r.OwnershipType = "FRANCHISE"
+	} else {
+		r.OwnershipType = "SINGLE"
+	}
+}
+
 func (m *MemoryRepository) GetRestaurantByID(ctx context.Context, id uuid.UUID) (*restaurant.Restaurant, error) {
 	m.mu.RLock()
 	defer m.mu.RUnlock()
@@ -681,6 +706,7 @@ func (m *MemoryRepository) GetRestaurantByID(ctx context.Context, id uuid.UUID) 
 		return nil, ErrNotFound
 	}
 	cpy := *r
+	m.fillRestaurant(&cpy)
 	return &cpy, nil
 }
 
@@ -697,6 +723,7 @@ func (m *MemoryRepository) GetRestaurantBySlug(ctx context.Context, slug string)
 		cleanSlugAlpha := strings.ReplaceAll(strings.ReplaceAll(cleanSlug, "-", ""), "_", "")
 		if cleanSlug != "" && (cleanSlug == target || cleanSlugAlpha == targetAlpha) {
 			cpy := *r
+			m.fillRestaurant(&cpy)
 			return &cpy, nil
 		}
 		// Match on name
@@ -704,6 +731,7 @@ func (m *MemoryRepository) GetRestaurantBySlug(ctx context.Context, slug string)
 		nameAlpha := strings.ReplaceAll(strings.ToLower(strings.TrimSpace(r.Name)), " ", "")
 		if nameSlug == target || nameAlpha == targetAlpha {
 			cpy := *r
+			m.fillRestaurant(&cpy)
 			return &cpy, nil
 		}
 	}
@@ -716,7 +744,9 @@ func (m *MemoryRepository) ListRestaurants(ctx context.Context) ([]restaurant.Re
 
 	var res []restaurant.Restaurant
 	for _, r := range m.restaurants {
-		res = append(res, *r)
+		cpy := *r
+		m.fillRestaurant(&cpy)
+		res = append(res, cpy)
 	}
 	return res, nil
 }
@@ -776,6 +806,24 @@ func (m *MemoryRepository) ListTables(ctx context.Context, restaurantID uuid.UUI
 		}
 	}
 	return res, nil
+}
+
+func (m *MemoryRepository) UpdateTable(ctx context.Context, t *restaurant.Table) error {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+
+	existing, ok := m.tables[t.ID]
+	if !ok {
+		return ErrNotFound
+	}
+	if existing.TableToken != t.TableToken {
+		delete(m.tablesByToken, existing.TableToken)
+	}
+	t.UpdatedAt = time.Now()
+	cpy := *t
+	m.tables[t.ID] = &cpy
+	m.tablesByToken[t.TableToken] = &cpy
+	return nil
 }
 
 func (m *MemoryRepository) CreateStaff(ctx context.Context, s *restaurant.StaffUser) error {
@@ -870,16 +918,16 @@ func (m *MemoryRepository) seedDefaultData() {
 
 	// 1. Default Restaurant
 	rest := &restaurant.Restaurant{
-		ID:                   restID,
-		Name:                 "The Spice Route",
-		Slug:                 "spiceroute",
-		GSTIN:                "07AABCG1234F1Z5",
-		CommissionRateBps:    100,
+		ID:                    restID,
+		Name:                  "The Spice Route",
+		Slug:                  "spiceroute",
+		GSTIN:                 "07AABCG1234F1Z5",
+		CommissionRateBps:     100,
 		SettlementBankDetails: "HDFC Bank • A/C 50200012345678 • IFSC HDFC0000128",
-		Status:               restaurant.StatusActive,
-		Timezone:             "Asia/Kolkata",
-		CreatedAt:            now,
-		UpdatedAt:            now,
+		Status:                restaurant.StatusActive,
+		Timezone:              "Asia/Kolkata",
+		CreatedAt:             now,
+		UpdatedAt:             now,
 	}
 	m.restaurants[restID] = rest
 
@@ -1136,7 +1184,29 @@ func (m *MemoryRepository) CreateMenuItem(ctx context.Context, mi *restaurant.Me
 
 	cpy := *mi
 	m.menuItems[mi.ID] = &cpy
+	if len(mi.Variants) > 0 {
+		m.replaceVariantsLocked(mi.ID, mi.Variants)
+	}
 	return nil
+}
+
+// replaceVariantsLocked swaps the variant set for a menu item. Caller must hold write lock.
+func (m *MemoryRepository) replaceVariantsLocked(menuItemID uuid.UUID, variants []restaurant.MenuItemVariant) {
+	for _, v := range m.menuItemVariants[menuItemID] {
+		delete(m.variantsByID, v.ID)
+	}
+	stored := make([]restaurant.MenuItemVariant, len(variants))
+	for i, v := range variants {
+		v.MenuItemID = menuItemID
+		stored[i] = v
+		vc := v
+		vc.MenuItemID = menuItemID
+		m.variantsByID[v.ID] = &vc
+	}
+	m.menuItemVariants[menuItemID] = stored
+	if item, ok := m.menuItems[menuItemID]; ok {
+		item.Variants = append([]restaurant.MenuItemVariant(nil), stored...)
+	}
 }
 
 func (m *MemoryRepository) GetMenuItemByID(ctx context.Context, id uuid.UUID) (*restaurant.MenuItem, error) {
@@ -1148,6 +1218,9 @@ func (m *MemoryRepository) GetMenuItemByID(ctx context.Context, id uuid.UUID) (*
 		return nil, ErrNotFound
 	}
 	cpy := *mi
+	if vars, ok := m.menuItemVariants[id]; ok {
+		cpy.Variants = append([]restaurant.MenuItemVariant(nil), vars...)
+	}
 	return &cpy, nil
 }
 
@@ -1158,10 +1231,47 @@ func (m *MemoryRepository) ListMenuItems(ctx context.Context, restaurantID uuid.
 	var res []restaurant.MenuItem
 	for _, mi := range m.menuItems {
 		if mi.RestaurantID == restaurantID {
-			res = append(res, *mi)
+			cpy := *mi
+			if vars, ok := m.menuItemVariants[mi.ID]; ok {
+				cpy.Variants = append([]restaurant.MenuItemVariant(nil), vars...)
+			}
+			res = append(res, cpy)
 		}
 	}
 	return res, nil
+}
+
+func (m *MemoryRepository) ListVariantsByMenuItemIDs(ctx context.Context, menuItemIDs []uuid.UUID) (map[uuid.UUID][]restaurant.MenuItemVariant, error) {
+	m.mu.RLock()
+	defer m.mu.RUnlock()
+
+	res := make(map[uuid.UUID][]restaurant.MenuItemVariant, len(menuItemIDs))
+	for _, id := range menuItemIDs {
+		if vars, ok := m.menuItemVariants[id]; ok {
+			res[id] = append([]restaurant.MenuItemVariant(nil), vars...)
+		}
+	}
+	return res, nil
+}
+
+func (m *MemoryRepository) ReplaceMenuItemVariants(ctx context.Context, menuItemID uuid.UUID, variants []restaurant.MenuItemVariant) error {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+
+	m.replaceVariantsLocked(menuItemID, variants)
+	return nil
+}
+
+func (m *MemoryRepository) GetMenuItemVariantByID(ctx context.Context, id uuid.UUID) (*restaurant.MenuItemVariant, error) {
+	m.mu.RLock()
+	defer m.mu.RUnlock()
+
+	v, ok := m.variantsByID[id]
+	if !ok {
+		return nil, ErrNotFound
+	}
+	cpy := *v
+	return &cpy, nil
 }
 
 func (m *MemoryRepository) UpdateMenuItemAvailability(ctx context.Context, id uuid.UUID, isAvailable bool) error {
@@ -1841,6 +1951,7 @@ func (m *MemoryRepository) GetSubscription(ctx context.Context, restaurantID uui
 	if cp.SubscriptionEndAt.IsZero() {
 		cp.SubscriptionEndAt = time.Now().Add(30 * 24 * time.Hour)
 	}
+	m.fillRestaurant(&cp)
 	return &cp, nil
 }
 
@@ -1863,7 +1974,182 @@ func (m *MemoryRepository) RenewSubscription(ctx context.Context, restaurantID u
 	rest.SubscriptionStatus = "ACTIVE"
 	rest.UpdatedAt = now
 	cp := *rest
+	m.fillRestaurant(&cp)
 	return &cp, nil
 }
 
+// ---------------- Subscription OTPs ----------------
 
+func (m *MemoryRepository) CreateSubscriptionOTP(ctx context.Context, o *restaurant.SubscriptionOTP) error {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+
+	cpy := *o
+	m.subscriptionOTPs[o.ID] = &cpy
+	return nil
+}
+
+func (m *MemoryRepository) GetActiveSubscriptionOTP(ctx context.Context, restaurantID uuid.UUID) (*restaurant.SubscriptionOTP, error) {
+	m.mu.RLock()
+	defer m.mu.RUnlock()
+
+	var best *restaurant.SubscriptionOTP
+	for _, o := range m.subscriptionOTPs {
+		if o.RestaurantID == restaurantID && o.Status == "ISSUED" && time.Now().Before(o.ExpiresAt) {
+			if best == nil || o.CreatedAt.After(best.CreatedAt) {
+				best = o
+			}
+		}
+	}
+	if best == nil {
+		return nil, ErrNotFound
+	}
+	cpy := *best
+	return &cpy, nil
+}
+
+func (m *MemoryRepository) UpdateSubscriptionOTP(ctx context.Context, o *restaurant.SubscriptionOTP) error {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+
+	if _, ok := m.subscriptionOTPs[o.ID]; !ok {
+		return ErrNotFound
+	}
+	cpy := *o
+	m.subscriptionOTPs[o.ID] = &cpy
+	return nil
+}
+
+func (m *MemoryRepository) ListSubscriptionOTPs(ctx context.Context, restaurantID uuid.UUID) ([]restaurant.SubscriptionOTP, error) {
+	m.mu.RLock()
+	defer m.mu.RUnlock()
+
+	var res []restaurant.SubscriptionOTP
+	for _, o := range m.subscriptionOTPs {
+		if o.RestaurantID == restaurantID {
+			res = append(res, *o)
+		}
+	}
+	sort.Slice(res, func(i, j int) bool { return res[i].CreatedAt.After(res[j].CreatedAt) })
+	return res, nil
+}
+
+// ConsumeSubscriptionOTP atomically flips ISSUED→USED; returns false if the OTP
+// is not currently ISSUED (e.g. already used or revoked).
+func (m *MemoryRepository) ConsumeSubscriptionOTP(ctx context.Context, id uuid.UUID) (bool, error) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+
+	o, ok := m.subscriptionOTPs[id]
+	if !ok {
+		return false, ErrNotFound
+	}
+	if o.Status != "ISSUED" {
+		return false, nil
+	}
+	now := time.Now()
+	o.Status = "USED"
+	o.UsedAt = &now
+	return true, nil
+}
+
+// ---------------- Franchises ----------------
+
+func (m *MemoryRepository) CreateFranchise(ctx context.Context, f *restaurant.Franchise) error {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+
+	cpy := *f
+	m.franchises[f.ID] = &cpy
+	return nil
+}
+
+func (m *MemoryRepository) GetFranchiseByID(ctx context.Context, id uuid.UUID) (*restaurant.Franchise, error) {
+	m.mu.RLock()
+	defer m.mu.RUnlock()
+
+	f, ok := m.franchises[id]
+	if !ok {
+		return nil, ErrNotFound
+	}
+	cpy := *f
+	return &cpy, nil
+}
+
+func (m *MemoryRepository) UpdateFranchise(ctx context.Context, f *restaurant.Franchise) error {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+
+	if _, ok := m.franchises[f.ID]; !ok {
+		return ErrNotFound
+	}
+	f.UpdatedAt = time.Now()
+	cpy := *f
+	m.franchises[f.ID] = &cpy
+	return nil
+}
+
+func (m *MemoryRepository) ListFranchises(ctx context.Context) ([]restaurant.Franchise, error) {
+	m.mu.RLock()
+	defer m.mu.RUnlock()
+
+	var res []restaurant.Franchise
+	for _, f := range m.franchises {
+		res = append(res, *f)
+	}
+	sort.Slice(res, func(i, j int) bool { return res[i].CreatedAt.Before(res[j].CreatedAt) })
+	return res, nil
+}
+
+func (m *MemoryRepository) ListRestaurantsByFranchise(ctx context.Context, franchiseID uuid.UUID) ([]restaurant.Restaurant, error) {
+	m.mu.RLock()
+	defer m.mu.RUnlock()
+
+	var res []restaurant.Restaurant
+	for _, r := range m.restaurants {
+		if r.FranchiseID != nil && *r.FranchiseID == franchiseID {
+			cpy := *r
+			m.fillRestaurant(&cpy)
+			res = append(res, cpy)
+		}
+	}
+	return res, nil
+}
+
+func (m *MemoryRepository) CreateFranchiseInviteCode(ctx context.Context, c *restaurant.FranchiseInviteCode) error {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+
+	if _, exists := m.franchiseInviteCodes[c.Code]; exists {
+		return ErrDuplicateKey
+	}
+	cpy := *c
+	m.franchiseInviteCodes[c.Code] = &cpy
+	return nil
+}
+
+func (m *MemoryRepository) GetFranchiseInviteCode(ctx context.Context, code string) (*restaurant.FranchiseInviteCode, error) {
+	m.mu.RLock()
+	defer m.mu.RUnlock()
+
+	c, ok := m.franchiseInviteCodes[code]
+	if !ok {
+		return nil, ErrNotFound
+	}
+	cpy := *c
+	return &cpy, nil
+}
+
+func (m *MemoryRepository) MarkFranchiseInviteCodeUsed(ctx context.Context, code string, restaurantID uuid.UUID) error {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+
+	c, ok := m.franchiseInviteCodes[code]
+	if !ok {
+		return ErrNotFound
+	}
+	now := time.Now()
+	c.UsedAt = &now
+	c.UsedByRestaurantID = &restaurantID
+	return nil
+}

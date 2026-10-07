@@ -101,42 +101,44 @@ func ValidateTransition(current, target State) error {
 }
 
 type DiningSession struct {
-	CustomerName       string       `json:"customer_name,omitempty"`
-	CustomerPhone      string       `json:"customer_phone,omitempty"`
-	GuestCount         int          `json:"guest_count,omitempty"`
-	VehicleNumber      string       `json:"vehicle_number,omitempty"`
-	ID                 uuid.UUID    `json:"id"`
-	RestaurantID       uuid.UUID    `json:"restaurant_id"`
-	TableID            uuid.UUID    `json:"table_id"`
-	Status             State        `json:"status"`
-	OpenedAt           time.Time    `json:"opened_at"`
-	ClosedAt           *time.Time   `json:"closed_at,omitempty"`
-	VerifiedAt         *time.Time   `json:"verified_at,omitempty"`
-	VerifiedByStaffID  *uuid.UUID   `json:"verified_by_staff_id,omitempty"`
-	RunningTotal       money.Money  `json:"running_total"`
-	FinalTotal         money.Money  `json:"final_total"`
-	PlatformFeeAmount  money.Money  `json:"platform_fee_amount"`
-	SessionToken       string       `json:"session_token"`
-	DeviceFingerprint  string       `json:"device_fingerprint"`
-	LastActivityAt     time.Time    `json:"last_activity_at"`
-	ExpiryDeadline     time.Time    `json:"expiry_deadline"`
+	CustomerName          string       `json:"customer_name,omitempty"`
+	CustomerPhone         string       `json:"customer_phone,omitempty"`
+	GuestCount            int          `json:"guest_count,omitempty"`
+	VehicleNumber         string       `json:"vehicle_number,omitempty"`
+	ID                    uuid.UUID    `json:"id"`
+	RestaurantID          uuid.UUID    `json:"restaurant_id"`
+	TableID               uuid.UUID    `json:"table_id"`
+	Status                State        `json:"status"`
+	OpenedAt              time.Time    `json:"opened_at"`
+	ClosedAt              *time.Time   `json:"closed_at,omitempty"`
+	VerifiedAt            *time.Time   `json:"verified_at,omitempty"`
+	VerifiedByStaffID     *uuid.UUID   `json:"verified_by_staff_id,omitempty"`
+	RunningTotal          money.Money  `json:"running_total"`
+	FinalTotal            money.Money  `json:"final_total"`
+	PlatformFeeAmount     money.Money  `json:"platform_fee_amount"`
+	SessionToken          string       `json:"session_token"`
+	DeviceFingerprint     string       `json:"device_fingerprint"`
+	LastActivityAt        time.Time    `json:"last_activity_at"`
+	ExpiryDeadline        time.Time    `json:"expiry_deadline"`
 	AssistanceReason      string       `json:"assistance_reason,omitempty"`
 	AssistanceRequestedAt *time.Time   `json:"assistance_requested_at,omitempty"`
-	CloseReason        *CloseReason `json:"close_reason,omitempty"`
-	ClosedByActorType  *ActorType   `json:"closed_by_actor_type,omitempty"`
-	ClosedByActorID    *string      `json:"closed_by_actor_id,omitempty"`
-	Version            int          `json:"version"`
-	CreatedAt          time.Time    `json:"created_at"`
-	UpdatedAt          time.Time    `json:"updated_at"`
+	AssignedWaiterID      *uuid.UUID   `json:"assigned_waiter_id,omitempty"`
+	AssignedWaiterName    string       `json:"assigned_waiter_name,omitempty"`
+	CloseReason           *CloseReason `json:"close_reason,omitempty"`
+	ClosedByActorType     *ActorType   `json:"closed_by_actor_type,omitempty"`
+	ClosedByActorID       *string      `json:"closed_by_actor_id,omitempty"`
+	Version               int          `json:"version"`
+	CreatedAt             time.Time    `json:"created_at"`
+	UpdatedAt             time.Time    `json:"updated_at"`
 }
 
 type SessionParticipant struct {
 	CustomerPhone string    `json:"customer_phone,omitempty"`
 	GuestCount    int       `json:"guest_count,omitempty"`
 	VehicleNumber string    `json:"vehicle_number,omitempty"`
-	ID          uuid.UUID `json:"id"`
-	SessionID   uuid.UUID `json:"session_id"`
-	DeviceToken string    `json:"device_token"`
-	DisplayName string    `json:"display_name,omitempty"`
-	JoinedAt    time.Time `json:"joined_at"`
+	ID            uuid.UUID `json:"id"`
+	SessionID     uuid.UUID `json:"session_id"`
+	DeviceToken   string    `json:"device_token"`
+	DisplayName   string    `json:"display_name,omitempty"`
+	JoinedAt      time.Time `json:"joined_at"`
 }

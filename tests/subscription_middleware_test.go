@@ -13,6 +13,7 @@ import (
 	"github.com/devrishijain/table-manager/internal/domain/restaurant"
 	"github.com/devrishijain/table-manager/internal/service"
 	"github.com/devrishijain/table-manager/internal/storage/memory"
+	"github.com/devrishijain/table-manager/pkg/crypto"
 	"github.com/google/uuid"
 	"golang.org/x/crypto/bcrypt"
 )
@@ -109,7 +110,28 @@ func TestSubscriptionMiddlewareAndRenewalFlow(t *testing.T) {
 		t.Fatalf("expected IsActive == false for expired subscription")
 	}
 
-	// Step 4: Call Renewal Endpoint to extend by 30 days
+	// Step 4: Platform admin issues an activation OTP; staff renews with it
+	adminToken, err := crypto.GenerateStaffJWT(jwtSecret, uuid.New(), uuid.New(), "SUPER_ADMIN", true, 24*time.Hour)
+	if err != nil {
+		t.Fatalf("failed to generate platform admin token: %v", err)
+	}
+	otpReqBody, _ := json.Marshal(map[string]interface{}{"days": 30, "plan": "PRO"})
+	reqOTP := httptest.NewRequest("POST", "/api/v1/admin/restaurants/"+restID.String()+"/subscription-otp", bytes.NewBuffer(otpReqBody))
+	reqOTP.Header.Set("Authorization", "Bearer "+adminToken)
+	reqOTP.Header.Set("Content-Type", "application/json")
+	wOTP := httptest.NewRecorder()
+	r.ServeHTTP(wOTP, reqOTP)
+	if wOTP.Code != http.StatusOK {
+		t.Fatalf("expected 200 OK generating subscription OTP, got %d: %s", wOTP.Code, wOTP.Body.String())
+	}
+	var otpResp struct {
+		OTP string `json:"otp"`
+	}
+	if err := json.Unmarshal(wOTP.Body.Bytes(), &otpResp); err != nil || otpResp.OTP == "" {
+		t.Fatalf("failed to parse OTP response: %v", err)
+	}
+
+	// Renew without OTP must be rejected
 	renewReqBody, _ := json.Marshal(map[string]int{
 		"days": 30,
 	})
@@ -117,6 +139,19 @@ func TestSubscriptionMiddlewareAndRenewalFlow(t *testing.T) {
 	reqRenew.Header.Set("Authorization", "Bearer "+loginResp.Token)
 	reqRenew.Header.Set("Content-Type", "application/json")
 	wRenew := httptest.NewRecorder()
+	r.ServeHTTP(wRenew, reqRenew)
+	if wRenew.Code != http.StatusBadRequest {
+		t.Fatalf("expected 400 on renewal without OTP, got %d: %s", wRenew.Code, wRenew.Body.String())
+	}
+
+	// Renew with the issued OTP
+	renewReqBody, _ = json.Marshal(map[string]interface{}{
+		"otp": otpResp.OTP,
+	})
+	reqRenew = httptest.NewRequest("POST", "/api/v1/restaurant/subscription/renew", bytes.NewBuffer(renewReqBody))
+	reqRenew.Header.Set("Authorization", "Bearer "+loginResp.Token)
+	reqRenew.Header.Set("Content-Type", "application/json")
+	wRenew = httptest.NewRecorder()
 	r.ServeHTTP(wRenew, reqRenew)
 
 	if wRenew.Code != http.StatusOK {

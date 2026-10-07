@@ -42,6 +42,7 @@ type Role string
 
 const (
 	RoleSuperAdmin      Role = "SUPER_ADMIN"
+	RoleFranchiseOwner  Role = "FRANCHISE_OWNER"
 	RoleRestaurantOwner Role = "RESTAURANT_OWNER"
 	RoleRestaurantAdmin Role = "RESTAURANT_ADMIN"
 	RoleManager         Role = "MANAGER"
@@ -52,37 +53,40 @@ const (
 )
 
 func (r Role) CanConfirmPayment() bool {
-	return r == RoleCashier || r == RoleManager || r == RoleRestaurantAdmin || r == RoleRestaurantOwner
+	return r == RoleCashier || r == RoleManager || r == RoleRestaurantAdmin || r == RoleRestaurantOwner || r == RoleFranchiseOwner
 }
 
 func (r Role) CanForceClose() bool {
-	return r == RoleManager || r == RoleRestaurantAdmin || r == RoleRestaurantOwner
+	return r == RoleManager || r == RoleRestaurantAdmin || r == RoleRestaurantOwner || r == RoleFranchiseOwner
 }
 
 func (r Role) CanIssueRefund() bool {
-	return r == RoleManager || r == RoleRestaurantAdmin || r == RoleRestaurantOwner
+	return r == RoleManager || r == RoleRestaurantAdmin || r == RoleRestaurantOwner || r == RoleFranchiseOwner
 }
 
 func (r Role) CanEditMenu() bool {
-	return r == RoleRestaurantAdmin || r == RoleRestaurantOwner
+	return r == RoleRestaurantAdmin || r == RoleRestaurantOwner || r == RoleFranchiseOwner
 }
 
 type Restaurant struct {
-	ID                    uuid.UUID   `json:"id"`
-	Name                  string      `json:"name"`
-	Slug                  string      `json:"slug,omitempty"`
-	Theme                 string      `json:"theme,omitempty"`
-	VenueType             VenueType   `json:"venue_type,omitempty"`
-	GSTIN                 string      `json:"gstin"`
-	CommissionRateBps     int64       `json:"commission_rate_bps"` // Default 100 = 1.00%
-	SettlementBankDetails string      `json:"settlement_bank_details"`
-	Status                Status      `json:"status"`
-	Timezone              string      `json:"timezone"` // e.g. "Asia/Kolkata"
-	SubscriptionPlan      string      `json:"subscription_plan"`   // e.g. "PRO", "BASIC"
-	SubscriptionStatus    string      `json:"subscription_status"` // e.g. "ACTIVE", "EXPIRED", "SUSPENDED"
-	SubscriptionEndAt     time.Time   `json:"subscription_end_at"`
-	CreatedAt             time.Time   `json:"created_at"`
-	UpdatedAt             time.Time   `json:"updated_at"`
+	ID                    uuid.UUID  `json:"id"`
+	Name                  string     `json:"name"`
+	Slug                  string     `json:"slug,omitempty"`
+	Theme                 string     `json:"theme,omitempty"`
+	VenueType             VenueType  `json:"venue_type,omitempty"`
+	GSTIN                 string     `json:"gstin"`
+	CommissionRateBps     int64      `json:"commission_rate_bps"` // Default 100 = 1.00%
+	SettlementBankDetails string     `json:"settlement_bank_details"`
+	Status                Status     `json:"status"`
+	Timezone              string     `json:"timezone"`            // e.g. "Asia/Kolkata"
+	SubscriptionPlan      string     `json:"subscription_plan"`   // e.g. "PRO", "BASIC"
+	SubscriptionStatus    string     `json:"subscription_status"` // e.g. "ACTIVE", "EXPIRED", "SUSPENDED"
+	SubscriptionEndAt     time.Time  `json:"subscription_end_at"`
+	FranchiseID           *uuid.UUID `json:"franchise_id,omitempty"`
+	FranchiseName         string     `json:"franchise_name,omitempty"`
+	OwnershipType         string     `json:"ownership_type"` // "FRANCHISE" or "SINGLE"
+	CreatedAt             time.Time  `json:"created_at"`
+	UpdatedAt             time.Time  `json:"updated_at"`
 }
 
 func (r *Restaurant) DaysRemaining() int {
@@ -153,41 +157,43 @@ type MenuCategory struct {
 }
 
 type MenuItem struct {
+	ID           uuid.UUID         `json:"id"`
+	RestaurantID uuid.UUID         `json:"restaurant_id"`
+	CategoryID   uuid.UUID         `json:"category_id"`
+	Name         string            `json:"name"`
+	Description  string            `json:"description"`
+	Price        money.Money       `json:"price"`
+	IsAvailable  bool              `json:"is_available"`
+	HSNSACCode   string            `json:"hsn_sac_code"`  // e.g. "996331" for restaurant dining GST
+	CGSTRateBps  int64             `json:"cgst_rate_bps"` // e.g. 250 for 2.5%
+	SGSTRateBps  int64             `json:"sgst_rate_bps"` // e.g. 250 for 2.5%
+	Variants     []MenuItemVariant `json:"variants,omitempty"`
+	CreatedAt    time.Time         `json:"created_at"`
+	UpdatedAt    time.Time         `json:"updated_at"`
+}
+
+type MenuItemVariant struct {
 	ID           uuid.UUID   `json:"id"`
-	RestaurantID uuid.UUID   `json:"restaurant_id"`
-	CategoryID   uuid.UUID   `json:"category_id"`
+	MenuItemID   uuid.UUID   `json:"menu_item_id"`
 	Name         string      `json:"name"`
-	Description  string      `json:"description"`
 	Price        money.Money `json:"price"`
 	IsAvailable  bool        `json:"is_available"`
-	HSNSACCode   string      `json:"hsn_sac_code"`  // e.g. "996331" for restaurant dining GST
-	CGSTRateBps  int64       `json:"cgst_rate_bps"` // e.g. 250 for 2.5%
-	SGSTRateBps  int64       `json:"sgst_rate_bps"` // e.g. 250 for 2.5%
+	DisplayOrder int         `json:"display_order"`
 	CreatedAt    time.Time   `json:"created_at"`
 	UpdatedAt    time.Time   `json:"updated_at"`
 }
 
-type MenuItemVariant struct {
-	ID            uuid.UUID   `json:"id"`
-	MenuItemID    uuid.UUID   `json:"menu_item_id"`
-	Name          string      `json:"name"`
-	PriceOverride money.Money `json:"price_override"`
-	IsAvailable   bool        `json:"is_available"`
-	CreatedAt     time.Time   `json:"created_at"`
-	UpdatedAt     time.Time   `json:"updated_at"`
-}
-
 type RestaurantSettings struct {
-	RestaurantID              uuid.UUID            `json:"restaurant_id"`
-	ExitVerificationMode      ExitVerificationMode `json:"exit_verification_mode"`
-	SharedSessionPolicy       SharedSessionPolicy  `json:"shared_session_policy"`
-	HighValueThresholdMinor   int64                `json:"high_value_threshold_minor"`
-	RapidOrderJumpFactor      int                  `json:"rapid_order_jump_factor"`
-	ExternalEvidenceRequired  bool                 `json:"external_evidence_required"`
-	POSEvidenceRequired       bool                 `json:"pos_evidence_required"`
-	FirstOrderOTPTTLMinutes   int                  `json:"first_order_otp_ttl_minutes"`
-	ExitPassOTPTTLMinutes     int                  `json:"exit_pass_otp_ttl_minutes"`
-	UpdatedAt                 time.Time            `json:"updated_at"`
+	RestaurantID             uuid.UUID            `json:"restaurant_id"`
+	ExitVerificationMode     ExitVerificationMode `json:"exit_verification_mode"`
+	SharedSessionPolicy      SharedSessionPolicy  `json:"shared_session_policy"`
+	HighValueThresholdMinor  int64                `json:"high_value_threshold_minor"`
+	RapidOrderJumpFactor     int                  `json:"rapid_order_jump_factor"`
+	ExternalEvidenceRequired bool                 `json:"external_evidence_required"`
+	POSEvidenceRequired      bool                 `json:"pos_evidence_required"`
+	FirstOrderOTPTTLMinutes  int                  `json:"first_order_otp_ttl_minutes"`
+	ExitPassOTPTTLMinutes    int                  `json:"exit_pass_otp_ttl_minutes"`
+	UpdatedAt                time.Time            `json:"updated_at"`
 }
 
 func DefaultSettings(restaurantID uuid.UUID) RestaurantSettings {
@@ -226,4 +232,41 @@ type RestaurantOnboarding struct {
 	CompletedAt             *time.Time       `json:"completed_at,omitempty"`
 	AssignedPlatformContact *string          `json:"assigned_platform_contact,omitempty"`
 	UpdatedAt               time.Time        `json:"updated_at"`
+}
+
+// PlatformRestaurantID is the fixed ID of the hidden platform restaurant that
+// hosts SUPER_ADMIN staff accounts. It is excluded from all tenant-facing lists.
+var PlatformRestaurantID = uuid.MustParse("00000000-0000-0000-0000-00000000a001")
+
+// SubscriptionOTP is a one-time activation code issued by platform admins that
+// restaurant staff must provide to activate/renew a subscription.
+type SubscriptionOTP struct {
+	ID               uuid.UUID  `json:"id"`
+	RestaurantID     uuid.UUID  `json:"restaurant_id"`
+	OTPHash          string     `json:"-"`
+	Days             int        `json:"days"`
+	Plan             string     `json:"plan"`
+	Status           string     `json:"status"` // ISSUED | USED | REVOKED
+	Attempts         int        `json:"attempts"`
+	ExpiresAt        time.Time  `json:"expires_at"`
+	UsedAt           *time.Time `json:"used_at,omitempty"`
+	CreatedByStaffID *uuid.UUID `json:"created_by_staff_id,omitempty"`
+	CreatedAt        time.Time  `json:"created_at"`
+}
+
+type Franchise struct {
+	ID           uuid.UUID  `json:"id"`
+	Name         string     `json:"name"`
+	OwnerStaffID *uuid.UUID `json:"owner_staff_id,omitempty"`
+	CreatedAt    time.Time  `json:"created_at"`
+	UpdatedAt    time.Time  `json:"updated_at"`
+}
+
+type FranchiseInviteCode struct {
+	Code               string     `json:"code"`
+	FranchiseID        uuid.UUID  `json:"franchise_id"`
+	ExpiresAt          time.Time  `json:"expires_at"`
+	UsedAt             *time.Time `json:"used_at,omitempty"`
+	UsedByRestaurantID *uuid.UUID `json:"used_by_restaurant_id,omitempty"`
+	CreatedAt          time.Time  `json:"created_at"`
 }

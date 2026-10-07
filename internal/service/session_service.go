@@ -12,21 +12,21 @@ import (
 	"github.com/devrishijain/table-manager/internal/domain/money"
 	"github.com/devrishijain/table-manager/internal/domain/restaurant"
 	"github.com/devrishijain/table-manager/internal/domain/session"
-	"github.com/devrishijain/table-manager/pkg/crypto"
 	"github.com/devrishijain/table-manager/internal/storage"
 	"github.com/devrishijain/table-manager/internal/ws"
+	"github.com/devrishijain/table-manager/pkg/crypto"
 	"github.com/google/uuid"
 )
 
 var (
-	ErrSessionNotFound     = errors.New("dining session not found")
-	ErrTableNotFound       = errors.New("table not found")
-	ErrInvalidTableQR      = errors.New("invalid or inactive table QR code")
-	ErrUnauthorizedStaff   = errors.New("unauthorized staff action: insufficient permissions")
-	ErrSingleDevicePolicy  = errors.New("restaurant policy allows only the original device to order at this table")
-	ErrFirstOrderOTPMiss   = errors.New("invalid first-order verification OTP")
-	ErrSessionNotOpen      = errors.New("session is not in an open state")
-	ErrCapacityExceeded    = errors.New("guest count exceeds table seating capacity")
+	ErrSessionNotFound    = errors.New("dining session not found")
+	ErrTableNotFound      = errors.New("table not found")
+	ErrInvalidTableQR     = errors.New("invalid or inactive table QR code")
+	ErrUnauthorizedStaff  = errors.New("unauthorized staff action: insufficient permissions")
+	ErrSingleDevicePolicy = errors.New("restaurant policy allows only the original device to order at this table")
+	ErrFirstOrderOTPMiss  = errors.New("invalid first-order verification OTP")
+	ErrSessionNotOpen     = errors.New("session is not in an open state")
+	ErrCapacityExceeded   = errors.New("guest count exceeds table seating capacity")
 )
 
 type SessionService struct {
@@ -385,6 +385,45 @@ func (s *SessionService) ReportWalkout(ctx context.Context, sessionID, staffID u
 	})
 
 	return nil
+}
+
+// ErrTableAssignedToOtherWaiter is returned when a waiter tries to serve a table
+// session that is already assigned to a different waiter.
+type ErrTableAssignedToOtherWaiter struct {
+	WaiterName string
+}
+
+func (e *ErrTableAssignedToOtherWaiter) Error() string {
+	return fmt.Sprintf("this table is being served by %s", e.WaiterName)
+}
+
+// ClaimForWaiter enforces waiter ownership of a table session. Only applies to
+// the WAITER role; all other roles bypass and never change the assignment.
+// An unassigned session is claimed by the caller; a session owned by another
+// waiter yields ErrTableAssignedToOtherWaiter.
+func (s *SessionService) ClaimForWaiter(ctx context.Context, sessionID, staffID uuid.UUID, role, name string) error {
+	if role != string(restaurant.RoleWaiter) {
+		return nil
+	}
+	sess, err := s.repo.GetSessionByID(ctx, sessionID)
+	if err != nil {
+		return ErrSessionNotFound
+	}
+	if sess.AssignedWaiterID == nil {
+		if name == "" {
+			if staff, serr := s.repo.GetStaffByID(ctx, staffID); serr == nil && staff != nil {
+				name = staff.Name
+			}
+		}
+		sess.AssignedWaiterID = &staffID
+		sess.AssignedWaiterName = name
+		sess.LastActivityAt = time.Now()
+		return s.repo.UpdateSession(ctx, sess)
+	}
+	if *sess.AssignedWaiterID == staffID {
+		return nil
+	}
+	return &ErrTableAssignedToOtherWaiter{WaiterName: sess.AssignedWaiterName}
 }
 
 func (s *SessionService) GetSession(ctx context.Context, sessionID uuid.UUID) (*session.DiningSession, error) {

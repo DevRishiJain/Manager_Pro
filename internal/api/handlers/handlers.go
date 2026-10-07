@@ -3,6 +3,7 @@ package handlers
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"net/http"
@@ -11,12 +12,13 @@ import (
 	"sync"
 	"time"
 
-	"golang.org/x/crypto/bcrypt"
 	"github.com/devrishijain/table-manager/pkg/crypto"
+	"golang.org/x/crypto/bcrypt"
 
 	objstore "github.com/devrishijain/table-manager/internal/adapter/storage"
 	"github.com/devrishijain/table-manager/internal/api/middleware"
 	"github.com/devrishijain/table-manager/internal/domain/audit"
+	"github.com/devrishijain/table-manager/internal/domain/exitpass"
 	"github.com/devrishijain/table-manager/internal/domain/money"
 	"github.com/devrishijain/table-manager/internal/domain/order"
 	"github.com/devrishijain/table-manager/internal/domain/payment"
@@ -222,6 +224,19 @@ func (h *APIHandler) PlaceOrder(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	// Waiter table-ownership claim when staff places the order
+	if claims, ok := middleware.GetStaffClaimsFromContext(r.Context()); ok && claims != nil {
+		if cerr := h.sessionService.ClaimForWaiter(r.Context(), sessionID, claims.StaffID, claims.Role, claims.Name); cerr != nil {
+			var assignErr *service.ErrTableAssignedToOtherWaiter
+			if errors.As(cerr, &assignErr) {
+				errorResponse(w, http.StatusForbidden, cerr.Error())
+			} else {
+				errorResponse(w, http.StatusBadRequest, cerr.Error())
+			}
+			return
+		}
+	}
+
 	ord, firstOTP, err := h.orderService.PlaceOrder(r.Context(), sessionID, req.Items)
 	if err != nil {
 		errorResponse(w, http.StatusBadRequest, err.Error())
@@ -358,8 +373,8 @@ func (h *APIHandler) RequestAssistance(w http.ResponseWriter, r *http.Request) {
 	}
 
 	jsonResponse(w, http.StatusOK, map[string]interface{}{
-		"status":                 "ASSISTANCE_REQUESTED",
-		"assistance_reason":      sess.AssistanceReason,
+		"status":                  "ASSISTANCE_REQUESTED",
+		"assistance_reason":       sess.AssistanceReason,
 		"assistance_requested_at": sess.AssistanceRequestedAt,
 	})
 }
@@ -409,6 +424,16 @@ func (h *APIHandler) VerifyFirstOrder(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	if cerr := h.sessionService.ClaimForWaiter(r.Context(), sessionID, claims.StaffID, claims.Role, claims.Name); cerr != nil {
+		var assignErr *service.ErrTableAssignedToOtherWaiter
+		if errors.As(cerr, &assignErr) {
+			errorResponse(w, http.StatusForbidden, cerr.Error())
+		} else {
+			errorResponse(w, http.StatusBadRequest, cerr.Error())
+		}
+		return
+	}
+
 	if err := h.sessionService.VerifyFirstOrder(r.Context(), sessionID, claims.StaffID, req.OTP); err != nil {
 		errorResponse(w, http.StatusBadRequest, err.Error())
 		return
@@ -429,6 +454,19 @@ func (h *APIHandler) AcceptOrder(w http.ResponseWriter, r *http.Request) {
 	if !ok {
 		errorResponse(w, http.StatusUnauthorized, "unauthorized staff")
 		return
+	}
+
+	// Waiter table-ownership claim: a waiter may only accept orders on tables they serve
+	if pending, perr := h.repo.GetOrderByID(r.Context(), orderID); perr == nil && pending != nil {
+		if cerr := h.sessionService.ClaimForWaiter(r.Context(), pending.SessionID, claims.StaffID, claims.Role, claims.Name); cerr != nil {
+			var assignErr *service.ErrTableAssignedToOtherWaiter
+			if errors.As(cerr, &assignErr) {
+				errorResponse(w, http.StatusForbidden, cerr.Error())
+			} else {
+				errorResponse(w, http.StatusBadRequest, cerr.Error())
+			}
+			return
+		}
 	}
 
 	ord, err := h.orderService.AcceptOrder(r.Context(), orderID, claims.StaffID)
@@ -584,7 +622,7 @@ func (h *APIHandler) StaffVoidPayment(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	if claims.Role != "MANAGER" && claims.Role != "RESTAURANT_ADMIN" && claims.Role != "RESTAURANT_OWNER" {
+	if claims.Role != "MANAGER" && claims.Role != "RESTAURANT_ADMIN" && claims.Role != "RESTAURANT_OWNER" && claims.Role != "FRANCHISE_OWNER" && claims.Role != "SUPER_ADMIN" {
 		errorResponse(w, http.StatusForbidden, "forbidden: manager or admin authorization required to void payment")
 		return
 	}
@@ -632,6 +670,7 @@ func (h *APIHandler) ForceCloseSession(w http.ResponseWriter, r *http.Request) {
 	if claims.Role != string(restaurant.RoleManager) &&
 		claims.Role != string(restaurant.RoleRestaurantAdmin) &&
 		claims.Role != string(restaurant.RoleRestaurantOwner) &&
+		claims.Role != string(restaurant.RoleFranchiseOwner) &&
 		claims.Role != string(restaurant.RoleSuperAdmin) {
 		errorResponse(w, http.StatusForbidden, "forbidden: insufficient permissions to force close session")
 		return
@@ -666,6 +705,32 @@ func (h *APIHandler) resolveRestaurantID(ctx context.Context, param string) uuid
 	return uuid.Nil
 }
 
+// canAccessRestaurant reports whether the staff principal may read data of the
+// target restaurant: platform super admins may access any restaurant, franchise
+// owners may access their own plus restaurants in the same franchise, all other
+// roles only their own restaurant.
+func (h *APIHandler) canAccessRestaurant(ctx context.Context, claims *crypto.StaffClaims, targetID uuid.UUID) bool {
+	if claims == nil {
+		return false
+	}
+	if claims.IsSuperAdmin() {
+		return true
+	}
+	if claims.RestaurantID == targetID {
+		return true
+	}
+	if claims.Role == string(restaurant.RoleFranchiseOwner) {
+		caller, err1 := h.repo.GetRestaurantByID(ctx, claims.RestaurantID)
+		target, err2 := h.repo.GetRestaurantByID(ctx, targetID)
+		if err1 == nil && err2 == nil && caller != nil && target != nil &&
+			caller.FranchiseID != nil && target.FranchiseID != nil &&
+			*caller.FranchiseID == *target.FranchiseID {
+			return true
+		}
+	}
+	return false
+}
+
 func (h *APIHandler) resolveTargetRestaurantID(r *http.Request) uuid.UUID {
 	restParam := strings.TrimSpace(r.URL.Query().Get("restaurant_id"))
 	claims, ok := middleware.GetStaffClaimsFromContext(r.Context())
@@ -673,7 +738,10 @@ func (h *APIHandler) resolveTargetRestaurantID(r *http.Request) uuid.UUID {
 		if claims.CanAccessMultiOutlets() {
 			if restParam != "" && restParam != "ALL" {
 				if parsed := h.resolveRestaurantID(r.Context(), restParam); parsed != uuid.Nil {
-					return parsed
+					if h.canAccessRestaurant(r.Context(), claims, parsed) {
+						return parsed
+					}
+					return claims.RestaurantID
 				}
 			}
 			if restParam == "ALL" {
@@ -684,7 +752,10 @@ func (h *APIHandler) resolveTargetRestaurantID(r *http.Request) uuid.UUID {
 			return claims.RestaurantID
 		}
 		if parsed := h.resolveRestaurantID(r.Context(), restParam); parsed != uuid.Nil {
-			return parsed
+			if h.canAccessRestaurant(r.Context(), claims, parsed) {
+				return parsed
+			}
+			return claims.RestaurantID
 		}
 		return claims.RestaurantID
 	}
@@ -698,11 +769,13 @@ func (h *APIHandler) GetTableDashboard(w http.ResponseWriter, r *http.Request) {
 	var restaurantID uuid.UUID
 	if claims, ok := middleware.GetStaffClaimsFromContext(r.Context()); ok && claims.RestaurantID != uuid.Nil {
 		restaurantID = claims.RestaurantID
-		if claims.CanAccessMultiOutlets() {
-			if restParam := r.URL.Query().Get("restaurant_id"); restParam != "" && restParam != "ALL" {
-				if parsed := h.resolveRestaurantID(r.Context(), restParam); parsed != uuid.Nil {
-					restaurantID = parsed
+		if restParam := r.URL.Query().Get("restaurant_id"); restParam != "" && restParam != "ALL" {
+			if parsed := h.resolveRestaurantID(r.Context(), restParam); parsed != uuid.Nil {
+				if !h.canAccessRestaurant(r.Context(), claims, parsed) {
+					errorResponse(w, http.StatusForbidden, "unauthorized access to tables of another restaurant")
+					return
 				}
+				restaurantID = parsed
 			}
 		} else if restParam := r.URL.Query().Get("restaurant_id"); restParam != "" {
 			requestedID := h.resolveRestaurantID(r.Context(), restParam)
@@ -721,7 +794,13 @@ func (h *APIHandler) GetTableDashboard(w http.ResponseWriter, r *http.Request) {
 	}
 
 	tables, _ := h.repo.ListTables(r.Context(), restaurantID)
-	activeSessions, _ := h.sessionService.ListActiveSessions(r.Context(), restaurantID)
+	activeSessions, _ := h.repo.ListActiveSessions(r.Context(), restaurantID)
+
+	var viewerClaims *crypto.StaffClaims
+	if claims, ok := middleware.GetStaffClaimsFromContext(r.Context()); ok {
+		viewerClaims = claims
+	}
+	isWaiter := viewerClaims != nil && viewerClaims.Role == string(restaurant.RoleWaiter)
 
 	sessionByTable := make(map[uuid.UUID]session.DiningSession)
 	for _, s := range activeSessions {
@@ -737,6 +816,9 @@ func (h *APIHandler) GetTableDashboard(w http.ResponseWriter, r *http.Request) {
 
 		var assistReason string
 		var assistAt *string
+		var assignedWaiterID *uuid.UUID
+		assignedWaiterName := ""
+		isAssignedToMe := false
 		if s, ok := sessionByTable[t.ID]; ok {
 			isOccupied = true
 			sessID = s.ID.String()
@@ -750,6 +832,14 @@ func (h *APIHandler) GetTableDashboard(w http.ResponseWriter, r *http.Request) {
 			if s.AssistanceRequestedAt != nil {
 				formatted := s.AssistanceRequestedAt.Format(time.RFC3339)
 				assistAt = &formatted
+			}
+			assignedWaiterID = s.AssignedWaiterID
+			assignedWaiterName = s.AssignedWaiterName
+			isAssignedToMe = isWaiter && s.AssignedWaiterID != nil && *s.AssignedWaiterID == viewerClaims.StaffID
+			// Waiters see redacted details for tables served by other waiters
+			if isWaiter && s.AssignedWaiterID != nil && *s.AssignedWaiterID != viewerClaims.StaffID {
+				custPhone = ""
+				runMinor = 0
 			}
 		}
 
@@ -772,6 +862,9 @@ func (h *APIHandler) GetTableDashboard(w http.ResponseWriter, r *http.Request) {
 			"guest_count":             guestCount,
 			"assistance_reason":       assistReason,
 			"assistance_requested_at": assistAt,
+			"assigned_waiter_id":      assignedWaiterID,
+			"assigned_waiter_name":    assignedWaiterName,
+			"is_assigned_to_me":       isAssignedToMe,
 		}
 		board = append(board, entry)
 	}
@@ -839,17 +932,13 @@ func (h *APIHandler) GetKitchenQueue(w http.ResponseWriter, r *http.Request) {
 	}
 
 	restaurantID := claims.RestaurantID
-	if claims.CanAccessMultiOutlets() {
-		if restParam := r.URL.Query().Get("restaurant_id"); restParam != "" && restParam != "ALL" {
-			if parsed := h.resolveRestaurantID(r.Context(), restParam); parsed != uuid.Nil {
-				restaurantID = parsed
+	if restParam := r.URL.Query().Get("restaurant_id"); restParam != "" && restParam != "ALL" {
+		if parsed := h.resolveRestaurantID(r.Context(), restParam); parsed != uuid.Nil {
+			if !h.canAccessRestaurant(r.Context(), claims, parsed) {
+				errorResponse(w, http.StatusForbidden, "unauthorized access to kitchen queue of another restaurant")
+				return
 			}
-		}
-	} else if restParam := r.URL.Query().Get("restaurant_id"); restParam != "" {
-		requestedID := h.resolveRestaurantID(r.Context(), restParam)
-		if requestedID != uuid.Nil && requestedID != restaurantID {
-			errorResponse(w, http.StatusForbidden, "unauthorized access to kitchen queue of another restaurant")
-			return
+			restaurantID = parsed
 		}
 	}
 
@@ -864,7 +953,34 @@ func (h *APIHandler) GetKitchenQueue(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	jsonResponse(w, http.StatusOK, queue)
+	// Resolve session waiter assignments once for filtering & enrichment
+	sessions, _ := h.repo.ListActiveSessions(r.Context(), restaurantID)
+	sessionByID := make(map[uuid.UUID]session.DiningSession, len(sessions))
+	for _, s := range sessions {
+		sessionByID[s.ID] = s
+	}
+	isWaiter := claims.Role == string(restaurant.RoleWaiter)
+
+	type kitchenQueueEntry struct {
+		order.Order
+		AssignedWaiterID   *uuid.UUID `json:"assigned_waiter_id,omitempty"`
+		AssignedWaiterName string     `json:"assigned_waiter_name,omitempty"`
+	}
+	entries := make([]kitchenQueueEntry, 0, len(queue))
+	for _, ord := range queue {
+		sess, hasSess := sessionByID[ord.SessionID]
+		if isWaiter && hasSess && sess.AssignedWaiterID != nil && *sess.AssignedWaiterID != claims.StaffID {
+			continue
+		}
+		e := kitchenQueueEntry{Order: ord}
+		if hasSess {
+			e.AssignedWaiterID = sess.AssignedWaiterID
+			e.AssignedWaiterName = sess.AssignedWaiterName
+		}
+		entries = append(entries, e)
+	}
+
+	jsonResponse(w, http.StatusOK, entries)
 }
 
 type UpdateKitchenStatusRequest struct {
@@ -920,11 +1036,11 @@ type RazorpayWebhookPayload struct {
 	Payload struct {
 		Payment struct {
 			Entity struct {
-				ID          string `json:"id"`
-				Amount      int64  `json:"amount"`
-				Status      string `json:"status"`
-				OrderID     string `json:"order_id"`
-				Notes       map[string]string `json:"notes"`
+				ID      string            `json:"id"`
+				Amount  int64             `json:"amount"`
+				Status  string            `json:"status"`
+				OrderID string            `json:"order_id"`
+				Notes   map[string]string `json:"notes"`
 			} `json:"entity"`
 		} `json:"payment"`
 	} `json:"payload"`
@@ -1103,7 +1219,32 @@ func (h *APIHandler) ListAllRestaurants(w http.ResponseWriter, r *http.Request) 
 		errorResponse(w, http.StatusInternalServerError, err.Error())
 		return
 	}
-	jsonResponse(w, http.StatusOK, list)
+
+	typeFilter := strings.ToUpper(strings.TrimSpace(r.URL.Query().Get("type")))
+	query := strings.ToLower(strings.TrimSpace(r.URL.Query().Get("q")))
+
+	enriched := make([]map[string]interface{}, 0, len(list))
+	for _, rest := range list {
+		if rest.ID == restaurant.PlatformRestaurantID {
+			continue
+		}
+		ownershipType := "SINGLE"
+		if rest.FranchiseID != nil {
+			ownershipType = "FRANCHISE"
+		}
+		if typeFilter != "" && ownershipType != typeFilter {
+			continue
+		}
+		if query != "" {
+			haystack := strings.ToLower(rest.Name + " " + rest.Slug)
+			if !strings.Contains(haystack, query) {
+				continue
+			}
+		}
+		enriched = append(enriched, h.outletInfo(r.Context(), rest))
+	}
+
+	jsonResponse(w, http.StatusOK, enriched)
 }
 
 type CommissionOverrideRequest struct {
@@ -1295,6 +1436,61 @@ func (h *APIHandler) ListMenuItems(w http.ResponseWriter, r *http.Request) {
 	jsonResponse(w, http.StatusOK, items)
 }
 
+// variantInput is the accepted JSON shape for menu item portion variants.
+type variantInput struct {
+	Name        string `json:"name"`
+	PriceMinor  int64  `json:"price_minor"`
+	Price       int64  `json:"price"`
+	IsAvailable *bool  `json:"is_available"`
+}
+
+// buildVariants validates variant inputs: names trimmed, non-empty and unique
+// per item (case-insensitive); price must be > 0. applyHeuristic mirrors the
+// onboarding price<10000→×100 rupees-to-minor interpretation.
+func buildVariants(inputs []variantInput, applyHeuristic bool) ([]restaurant.MenuItemVariant, error) {
+	variants := make([]restaurant.MenuItemVariant, 0, len(inputs))
+	seen := make(map[string]bool, len(inputs))
+	for i, in := range inputs {
+		name := strings.TrimSpace(in.Name)
+		if name == "" {
+			return nil, fmt.Errorf("variant name cannot be empty")
+		}
+		key := strings.ToLower(name)
+		if seen[key] {
+			return nil, fmt.Errorf("duplicate variant name %q", name)
+		}
+		seen[key] = true
+
+		priceMinor := in.PriceMinor
+		if priceMinor == 0 && in.Price != 0 {
+			if applyHeuristic && in.Price < 10000 {
+				priceMinor = in.Price * 100
+			} else {
+				priceMinor = in.Price
+			}
+		}
+		if priceMinor <= 0 {
+			return nil, fmt.Errorf("variant %q requires a positive price", name)
+		}
+
+		available := true
+		if in.IsAvailable != nil {
+			available = *in.IsAvailable
+		}
+		now := time.Now()
+		variants = append(variants, restaurant.MenuItemVariant{
+			ID:           uuid.New(),
+			Name:         name,
+			Price:        money.New(priceMinor),
+			IsAvailable:  available,
+			DisplayOrder: i,
+			CreatedAt:    now,
+			UpdatedAt:    now,
+		})
+	}
+	return variants, nil
+}
+
 func (h *APIHandler) CreateMenuItem(w http.ResponseWriter, r *http.Request) {
 	claims, ok := middleware.GetStaffClaimsFromContext(r.Context())
 	if !ok {
@@ -1302,21 +1498,36 @@ func (h *APIHandler) CreateMenuItem(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	var item struct {
-		CategoryID  uuid.UUID `json:"category_id"`
-		Name        string    `json:"name"`
-		Description string    `json:"description"`
-		PriceMinor  int64     `json:"price_minor"`
-		Price       int64     `json:"price"`
-		CGSTRateBps int64     `json:"cgst_rate_bps"`
-		SGSTRateBps int64     `json:"sgst_rate_bps"`
+		CategoryID  uuid.UUID      `json:"category_id"`
+		Name        string         `json:"name"`
+		Description string         `json:"description"`
+		PriceMinor  int64          `json:"price_minor"`
+		Price       int64          `json:"price"`
+		CGSTRateBps int64          `json:"cgst_rate_bps"`
+		SGSTRateBps int64          `json:"sgst_rate_bps"`
+		Variants    []variantInput `json:"variants"`
 	}
 	if err := json.NewDecoder(r.Body).Decode(&item); err != nil || strings.TrimSpace(item.Name) == "" {
 		errorResponse(w, http.StatusBadRequest, "valid menu item payload required")
 		return
 	}
+
+	variants, err := buildVariants(item.Variants, false)
+	if err != nil {
+		errorResponse(w, http.StatusBadRequest, err.Error())
+		return
+	}
+
 	priceMinor := item.PriceMinor
 	if priceMinor == 0 && item.Price != 0 {
 		priceMinor = item.Price
+	}
+	if priceMinor <= 0 && len(variants) > 0 {
+		for _, v := range variants {
+			if v.Price.AmountMinorUnits > priceMinor {
+				priceMinor = v.Price.AmountMinorUnits
+			}
+		}
 	}
 	cgst := item.CGSTRateBps
 	if cgst == 0 {
@@ -1337,6 +1548,7 @@ func (h *APIHandler) CreateMenuItem(w http.ResponseWriter, r *http.Request) {
 		HSNSACCode:   "996331",
 		CGSTRateBps:  cgst,
 		SGSTRateBps:  sgst,
+		Variants:     variants,
 		CreatedAt:    time.Now(),
 		UpdatedAt:    time.Now(),
 	}
@@ -1345,6 +1557,52 @@ func (h *APIHandler) CreateMenuItem(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	jsonResponse(w, http.StatusCreated, mi)
+}
+
+func (h *APIHandler) UpdateMenuItemVariants(w http.ResponseWriter, r *http.Request) {
+	claims, ok := middleware.GetStaffClaimsFromContext(r.Context())
+	if !ok {
+		errorResponse(w, http.StatusUnauthorized, "unauthorized staff")
+		return
+	}
+
+	itemID, err := uuid.Parse(chi.URLParam(r, "id"))
+	if err != nil {
+		errorResponse(w, http.StatusBadRequest, "invalid menu item ID")
+		return
+	}
+
+	item, err := h.repo.GetMenuItemByID(r.Context(), itemID)
+	if err != nil || item == nil {
+		errorResponse(w, http.StatusNotFound, "menu item not found")
+		return
+	}
+	if !h.canAccessRestaurant(r.Context(), claims, item.RestaurantID) {
+		errorResponse(w, http.StatusForbidden, "forbidden: menu item belongs to another restaurant")
+		return
+	}
+
+	var req struct {
+		Variants []variantInput `json:"variants"`
+	}
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		errorResponse(w, http.StatusBadRequest, "invalid request body")
+		return
+	}
+
+	variants, err := buildVariants(req.Variants, false)
+	if err != nil {
+		errorResponse(w, http.StatusBadRequest, err.Error())
+		return
+	}
+
+	if err := h.repo.ReplaceMenuItemVariants(r.Context(), itemID, variants); err != nil {
+		errorResponse(w, http.StatusInternalServerError, err.Error())
+		return
+	}
+
+	item.Variants = variants
+	jsonResponse(w, http.StatusOK, item)
 }
 
 func (h *APIHandler) ListStaff(w http.ResponseWriter, r *http.Request) {
@@ -1424,7 +1682,7 @@ func (h *APIHandler) CheckHandleAvailability(w http.ResponseWriter, r *http.Requ
 	}
 
 	rest, err := h.repo.GetRestaurantBySlug(r.Context(), handle)
-	exists := (err == nil && rest != nil)
+	exists := (err == nil && rest != nil && rest.ID != restaurant.PlatformRestaurantID)
 
 	res := map[string]interface{}{
 		"handle":    handle,
@@ -1464,7 +1722,7 @@ func (h *APIHandler) LookupRestaurantPublic(w http.ResponseWriter, r *http.Reque
 		rest, err = h.repo.GetRestaurantBySlug(r.Context(), identifier)
 	}
 
-	if err != nil || rest == nil {
+	if err != nil || rest == nil || rest.ID == restaurant.PlatformRestaurantID {
 		errorResponse(w, http.StatusNotFound, "restaurant not found")
 		return
 	}
@@ -1637,7 +1895,8 @@ func (h *APIHandler) GetSubscription(w http.ResponseWriter, r *http.Request) {
 }
 
 type RenewSubscriptionRequest struct {
-	Days int `json:"days,omitempty"`
+	OTP  string `json:"otp"`
+	Days int    `json:"days,omitempty"`
 }
 
 func (h *APIHandler) RenewSubscription(w http.ResponseWriter, r *http.Request) {
@@ -1647,27 +1906,217 @@ func (h *APIHandler) RenewSubscription(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	var req RenewSubscriptionRequest
-	_ = json.NewDecoder(r.Body).Decode(&req)
-	if req.Days <= 0 {
-		req.Days = 30
+	switch claims.Role {
+	case string(restaurant.RoleRestaurantOwner), string(restaurant.RoleRestaurantAdmin),
+		string(restaurant.RoleFranchiseOwner), string(restaurant.RoleManager), string(restaurant.RoleSuperAdmin):
+	default:
+		errorResponse(w, http.StatusForbidden, "forbidden: insufficient role permissions")
+		return
 	}
 
-	rest, err := h.repo.RenewSubscription(r.Context(), claims.RestaurantID, req.Days)
+	var req RenewSubscriptionRequest
+	_ = json.NewDecoder(r.Body).Decode(&req)
+
+	rawOTP := strings.TrimSpace(req.OTP)
+	if rawOTP == "" {
+		errorResponse(w, http.StatusBadRequest, "otp is required; contact TableOS support to receive your activation OTP")
+		return
+	}
+
+	otp, err := h.repo.GetActiveSubscriptionOTP(r.Context(), claims.RestaurantID)
+	if err != nil || otp == nil {
+		errorResponse(w, http.StatusBadRequest, "no active activation OTP for this restaurant")
+		return
+	}
+
+	if otp.Attempts >= 5 {
+		otp.Status = "REVOKED"
+		_ = h.repo.UpdateSubscriptionOTP(r.Context(), otp)
+		errorResponse(w, http.StatusTooManyRequests, "too many invalid OTP attempts; request a new activation OTP")
+		return
+	}
+
+	if !exitpass.VerifyOTP(rawOTP, otp.OTPHash) {
+		otp.Attempts++
+		_ = h.repo.UpdateSubscriptionOTP(r.Context(), otp)
+		errorResponse(w, http.StatusBadRequest, "invalid OTP")
+		return
+	}
+
+	if req.Days > 0 && req.Days != otp.Days {
+		errorResponse(w, http.StatusBadRequest, fmt.Sprintf("this OTP activates the %d-day plan; select that plan", otp.Days))
+		return
+	}
+
+	// Atomically consume the OTP so concurrent requests cannot both use it
+	consumed, cerr := h.repo.ConsumeSubscriptionOTP(r.Context(), otp.ID)
+	if cerr != nil {
+		errorResponse(w, http.StatusInternalServerError, "failed to consume OTP")
+		return
+	}
+	if !consumed {
+		errorResponse(w, http.StatusBadRequest, "this OTP has already been used")
+		return
+	}
+
+	rest, err := h.repo.RenewSubscription(r.Context(), claims.RestaurantID, otp.Days)
 	if err != nil {
+		// Roll the OTP back to ISSUED so it can be retried
+		otp.Status = "ISSUED"
+		otp.UsedAt = nil
+		_ = h.repo.UpdateSubscriptionOTP(r.Context(), otp)
 		errorResponse(w, http.StatusInternalServerError, "failed to renew subscription")
 		return
 	}
 
+	plan := otp.Plan
+	if plan == "" {
+		plan = "PRO"
+	}
+	rest.SubscriptionPlan = plan
+	rest.SubscriptionStatus = "ACTIVE"
+	_ = h.repo.UpdateRestaurant(r.Context(), rest)
+
 	jsonResponse(w, http.StatusOK, map[string]interface{}{
-		"message":             fmt.Sprintf("Subscription successfully extended by %d days.", req.Days),
+		"message":             fmt.Sprintf("Subscription successfully extended by %d days.", otp.Days),
 		"restaurant_id":       rest.ID,
 		"subscription_plan":   rest.SubscriptionPlan,
 		"subscription_status": rest.SubscriptionStatus,
 		"subscription_end_at": rest.SubscriptionEndAt,
 		"days_remaining":      rest.DaysRemaining(),
 		"is_active":           rest.IsSubscriptionActive(),
+		"plan":                rest.SubscriptionPlan,
+		"days":                otp.Days,
 	})
+}
+
+// franchiseForCaller resolves the franchise of the caller's restaurant.
+// When selfHeal is true and the caller is a FRANCHISE_OWNER without a franchise,
+// one is created and the restaurant attached (legacy self-heal path).
+func (h *APIHandler) franchiseForCaller(ctx context.Context, claims *crypto.StaffClaims, selfHeal bool) (*restaurant.Franchise, error) {
+	rest, err := h.repo.GetRestaurantByID(ctx, claims.RestaurantID)
+	if err != nil || rest == nil {
+		return nil, fmt.Errorf("restaurant not found")
+	}
+	if rest.FranchiseID != nil {
+		return h.repo.GetFranchiseByID(ctx, *rest.FranchiseID)
+	}
+	if selfHeal && claims.Role == string(restaurant.RoleFranchiseOwner) {
+		now := time.Now()
+		fr := &restaurant.Franchise{
+			ID:           uuid.New(),
+			Name:         rest.Name,
+			OwnerStaffID: &claims.StaffID,
+			CreatedAt:    now,
+			UpdatedAt:    now,
+		}
+		if err := h.repo.CreateFranchise(ctx, fr); err != nil {
+			return nil, err
+		}
+		rest.FranchiseID = &fr.ID
+		_ = h.repo.UpdateRestaurant(ctx, rest)
+		return fr, nil
+	}
+	return nil, nil
+}
+
+// revenueSinceMinor sums non-cancelled order totals for a restaurant since the given time.
+func (h *APIHandler) revenueSinceMinor(ctx context.Context, restaurantID uuid.UUID, since time.Time) int64 {
+	orders, err := h.orderService.ListOrders(ctx, restaurantID, 500, &since, nil)
+	if err != nil {
+		return 0
+	}
+	var total int64
+	for _, o := range orders {
+		if o.Status == order.StateCancelled || o.Status == order.StateRejected {
+			continue
+		}
+		total += o.Total.AmountMinorUnits
+	}
+	return total
+}
+
+// outletInfo builds the enriched franchise-outlet / admin restaurant view.
+func (h *APIHandler) outletInfo(ctx context.Context, rest restaurant.Restaurant) map[string]interface{} {
+	tables, _ := h.repo.ListTables(ctx, rest.ID)
+	activeSessions, _ := h.repo.ListActiveSessions(ctx, rest.ID)
+
+	now := time.Now().UTC()
+	dayStart := time.Date(now.Year(), now.Month(), now.Day(), 0, 0, 0, 0, time.UTC)
+	thirtyDaysAgo := dayStart.AddDate(0, 0, -30)
+
+	ordersToday := 0
+	var revenueToday int64
+	if orders, err := h.orderService.ListOrders(ctx, rest.ID, 500, &dayStart, nil); err == nil {
+		for _, o := range orders {
+			if o.Status == order.StateCancelled || o.Status == order.StateRejected {
+				continue
+			}
+			ordersToday++
+			revenueToday += o.Total.AmountMinorUnits
+		}
+	}
+	revenue30d := h.revenueSinceMinor(ctx, rest.ID, thirtyDaysAgo)
+
+	return map[string]interface{}{
+		"id":                     rest.ID,
+		"name":                   rest.Name,
+		"slug":                   rest.Slug,
+		"theme":                  rest.Theme,
+		"venue_type":             rest.VenueType,
+		"status":                 rest.Status,
+		"subscription_plan":      rest.SubscriptionPlan,
+		"subscription_status":    rest.SubscriptionStatus,
+		"subscription_end_at":    rest.SubscriptionEndAt,
+		"days_remaining":         rest.DaysRemaining(),
+		"is_active":              rest.IsSubscriptionActive(),
+		"is_subscription_active": rest.IsSubscriptionActive(),
+		"franchise_id":           rest.FranchiseID,
+		"franchise_name":         rest.FranchiseName,
+		"ownership_type":         rest.OwnershipType,
+		"table_count":            len(tables),
+		"active_sessions":        len(activeSessions),
+		"orders_today":           ordersToday,
+		"revenue_today_minor":    revenueToday,
+		"revenue_30d_minor":      revenue30d,
+		"created_at":             rest.CreatedAt,
+	}
+}
+
+// franchiseOutletSet resolves the restaurant set a caller may view as "outlets".
+func (h *APIHandler) franchiseOutletSet(ctx context.Context, claims *crypto.StaffClaims, r *http.Request) ([]restaurant.Restaurant, error) {
+	if claims.IsSuperAdmin() {
+		if fidParam := strings.TrimSpace(r.URL.Query().Get("franchise_id")); fidParam != "" {
+			if fid, err := uuid.Parse(fidParam); err == nil {
+				return h.repo.ListRestaurantsByFranchise(ctx, fid)
+			}
+		}
+		all, err := h.repo.ListRestaurants(ctx)
+		if err != nil {
+			return nil, err
+		}
+		out := make([]restaurant.Restaurant, 0, len(all))
+		for _, rest := range all {
+			if rest.ID != restaurant.PlatformRestaurantID {
+				out = append(out, rest)
+			}
+		}
+		return out, nil
+	}
+
+	fr, err := h.franchiseForCaller(ctx, claims, false)
+	if err != nil {
+		return nil, err
+	}
+	if fr == nil {
+		// Franchise owner without a franchise yet: their own restaurant is the only outlet
+		rest, rerr := h.repo.GetRestaurantByID(ctx, claims.RestaurantID)
+		if rerr != nil || rest == nil {
+			return []restaurant.Restaurant{}, nil
+		}
+		return []restaurant.Restaurant{*rest}, nil
+	}
+	return h.repo.ListRestaurantsByFranchise(ctx, fr.ID)
 }
 
 func (h *APIHandler) GetFranchiseOutlets(w http.ResponseWriter, r *http.Request) {
@@ -1677,29 +2126,15 @@ func (h *APIHandler) GetFranchiseOutlets(w http.ResponseWriter, r *http.Request)
 		return
 	}
 
-	rests, err := h.repo.ListRestaurants(r.Context())
-	if err != nil || len(rests) == 0 {
-		rest, _ := h.repo.GetSubscription(r.Context(), claims.RestaurantID)
-		if rest != nil {
-			rests = []restaurant.Restaurant{*rest}
-		} else {
-			rests = []restaurant.Restaurant{}
-		}
+	rests, err := h.franchiseOutletSet(r.Context(), claims, r)
+	if err != nil {
+		errorResponse(w, http.StatusInternalServerError, err.Error())
+		return
 	}
 
 	outlets := make([]map[string]interface{}, 0, len(rests))
 	for _, rest := range rests {
-		outlets = append(outlets, map[string]interface{}{
-			"id":                  rest.ID,
-			"name":                rest.Name,
-			"slug":                rest.Slug,
-			"status":              rest.Status,
-			"subscription_plan":   rest.SubscriptionPlan,
-			"subscription_status": rest.SubscriptionStatus,
-			"subscription_end_at": rest.SubscriptionEndAt,
-			"days_remaining":      rest.DaysRemaining(),
-			"is_active":           rest.IsSubscriptionActive(),
-		})
+		outlets = append(outlets, h.outletInfo(r.Context(), rest))
 	}
 
 	jsonResponse(w, http.StatusOK, outlets)
@@ -1712,42 +2147,75 @@ func (h *APIHandler) GetFranchiseSummary(w http.ResponseWriter, r *http.Request)
 		return
 	}
 
-	rests, err := h.repo.ListRestaurants(r.Context())
-	if err != nil || len(rests) == 0 {
-		rest, _ := h.repo.GetSubscription(r.Context(), claims.RestaurantID)
-		if rest != nil {
-			rests = []restaurant.Restaurant{*rest}
-		} else {
-			rests = []restaurant.Restaurant{}
-		}
+	fr, _ := h.franchiseForCaller(r.Context(), claims, false)
+	rests, err := h.franchiseOutletSet(r.Context(), claims, r)
+	if err != nil {
+		errorResponse(w, http.StatusInternalServerError, err.Error())
+		return
 	}
 
 	activeCount := 0
 	expiredCount := 0
+	var totalRevenue30d int64
+	topOutlet := ""
+	var topRevenue int64
+
+	thirtyDaysAgo := time.Now().UTC().AddDate(0, 0, -30)
 	for _, rest := range rests {
 		if rest.IsSubscriptionActive() {
 			activeCount++
 		} else {
 			expiredCount++
 		}
+		rev := h.revenueSinceMinor(r.Context(), rest.ID, thirtyDaysAgo)
+		totalRevenue30d += rev
+		if rev > topRevenue {
+			topRevenue = rev
+			topOutlet = rest.Name
+		}
 	}
 
-	topName := "Spice Route Central"
-	if len(rests) > 0 {
-		topName = rests[0].Name
+	var franchiseID interface{}
+	franchiseName := ""
+	if fr != nil {
+		franchiseID = fr.ID
+		franchiseName = fr.Name
 	}
 
 	jsonResponse(w, http.StatusOK, map[string]interface{}{
+		"franchise_id":          franchiseID,
+		"franchise_name":        franchiseName,
 		"total_outlets":         len(rests),
 		"active_subscriptions":  activeCount,
 		"expired_subscriptions": expiredCount,
-		"top_performing_outlet": topName,
-		"total_revenue_minor":   24500000,
+		"top_performing_outlet": topOutlet,
+		"total_revenue_minor":   totalRevenue30d,
 	})
 }
 
-// Global memory map for 15-minute franchise invite OTP codes
-var franchiseInviteCodes = make(map[string]map[string]interface{})
+func (h *APIHandler) GetFranchiseInviteInfo(w http.ResponseWriter, r *http.Request) {
+	code := strings.ToUpper(strings.TrimSpace(chi.URLParam(r, "code")))
+	if code == "" {
+		jsonResponse(w, http.StatusOK, map[string]interface{}{"valid": false})
+		return
+	}
+
+	invite, err := h.repo.GetFranchiseInviteCode(r.Context(), code)
+	if err != nil || invite == nil || invite.UsedAt != nil || time.Now().After(invite.ExpiresAt) {
+		jsonResponse(w, http.StatusOK, map[string]interface{}{"valid": false})
+		return
+	}
+
+	resp := map[string]interface{}{
+		"valid":        true,
+		"franchise_id": invite.FranchiseID,
+		"expires_at":   invite.ExpiresAt,
+	}
+	if fr, ferr := h.repo.GetFranchiseByID(r.Context(), invite.FranchiseID); ferr == nil && fr != nil {
+		resp["franchise_name"] = fr.Name
+	}
+	jsonResponse(w, http.StatusOK, resp)
+}
 
 func (h *APIHandler) GenerateFranchiseInviteCode(w http.ResponseWriter, r *http.Request) {
 	claims, ok := middleware.GetStaffClaimsFromContext(r.Context())
@@ -1756,20 +2224,58 @@ func (h *APIHandler) GenerateFranchiseInviteCode(w http.ResponseWriter, r *http.
 		return
 	}
 
-	code := fmt.Sprintf("FRN-%d", 100000+time.Now().UnixNano()%899999)
-	expiresAt := time.Now().Add(15 * time.Minute)
+	var req struct {
+		FranchiseID string `json:"franchise_id"`
+	}
+	_ = json.NewDecoder(r.Body).Decode(&req)
 
-	franchiseInviteCodes[code] = map[string]interface{}{
-		"franchise_id": claims.RestaurantID,
-		"expires_at":   expiresAt,
-		"used":         false,
+	var franchiseID uuid.UUID
+	if claims.IsSuperAdmin() && strings.TrimSpace(req.FranchiseID) != "" {
+		fid, err := uuid.Parse(strings.TrimSpace(req.FranchiseID))
+		if err != nil {
+			errorResponse(w, http.StatusBadRequest, "invalid franchise_id")
+			return
+		}
+		franchiseID = fid
+	} else {
+		fr, err := h.franchiseForCaller(r.Context(), claims, true)
+		if err != nil {
+			errorResponse(w, http.StatusInternalServerError, err.Error())
+			return
+		}
+		if fr == nil {
+			errorResponse(w, http.StatusBadRequest, "restaurant is not part of a franchise")
+			return
+		}
+		franchiseID = fr.ID
 	}
 
-	jsonResponse(w, http.StatusOK, map[string]interface{}{
-		"code":       code,
-		"expires_at": expiresAt.Format(time.RFC3339),
-		"message":    "Single-use 15-minute link code generated successfully.",
-	})
+	expiresAt := time.Now().Add(15 * time.Minute)
+	var code string
+	for i := 0; i < 10; i++ {
+		digits, err := exitpass.GenerateNumericOTP(6)
+		if err != nil {
+			errorResponse(w, http.StatusInternalServerError, "failed to generate invite code")
+			return
+		}
+		code = "FRN-" + digits
+		invite := &restaurant.FranchiseInviteCode{
+			Code:        code,
+			FranchiseID: franchiseID,
+			ExpiresAt:   expiresAt,
+			CreatedAt:   time.Now(),
+		}
+		if err := h.repo.CreateFranchiseInviteCode(r.Context(), invite); err == nil {
+			jsonResponse(w, http.StatusOK, map[string]interface{}{
+				"code":         code,
+				"expires_at":   expiresAt.Format(time.RFC3339),
+				"message":      "Single-use 15-minute link code generated successfully.",
+				"franchise_id": franchiseID,
+			})
+			return
+		}
+	}
+	errorResponse(w, http.StatusInternalServerError, "failed to allocate invite code")
 }
 
 func (h *APIHandler) LinkRestaurantToFranchise(w http.ResponseWriter, r *http.Request) {
@@ -1788,26 +2294,49 @@ func (h *APIHandler) LinkRestaurantToFranchise(w http.ResponseWriter, r *http.Re
 		return
 	}
 
-	info, exists := franchiseInviteCodes[req.Code]
-	if !exists {
-		errorResponse(w, http.StatusBadRequest, "invalid or expired invite code")
+	// Verify caller's password against their stored staff password hash
+	staff, err := h.repo.GetStaffByID(r.Context(), claims.StaffID)
+	if err != nil || staff == nil ||
+		bcrypt.CompareHashAndPassword([]byte(staff.PasswordHash), []byte(req.Password)) != nil {
+		errorResponse(w, http.StatusUnauthorized, "invalid password")
 		return
 	}
 
-	expiresAt, _ := info["expires_at"].(time.Time)
-	used, _ := info["used"].(bool)
-	if used || time.Now().After(expiresAt) {
-		errorResponse(w, http.StatusBadRequest, "invite code expired or already used")
+	rest, err := h.repo.GetRestaurantByID(r.Context(), claims.RestaurantID)
+	if err != nil || rest == nil {
+		errorResponse(w, http.StatusNotFound, "restaurant not found")
+		return
+	}
+	if rest.FranchiseID != nil {
+		errorResponse(w, http.StatusConflict, "restaurant is already linked to a franchise")
 		return
 	}
 
-	// Mark code as used
-	info["used"] = true
+	code := strings.ToUpper(strings.TrimSpace(req.Code))
+	invite, err := h.repo.GetFranchiseInviteCode(r.Context(), code)
+	if err != nil || invite == nil || invite.UsedAt != nil || time.Now().After(invite.ExpiresAt) {
+		errorResponse(w, http.StatusBadRequest, "invalid or expired franchise invite code")
+		return
+	}
+
+	rest.FranchiseID = &invite.FranchiseID
+	if err := h.repo.UpdateRestaurant(r.Context(), rest); err != nil {
+		errorResponse(w, http.StatusInternalServerError, err.Error())
+		return
+	}
+	_ = h.repo.MarkFranchiseInviteCodeUsed(r.Context(), code, rest.ID)
+
+	franchiseName := ""
+	if fr, ferr := h.repo.GetFranchiseByID(r.Context(), invite.FranchiseID); ferr == nil && fr != nil {
+		franchiseName = fr.Name
+	}
 
 	jsonResponse(w, http.StatusOK, map[string]interface{}{
-		"success":       true,
-		"message":       "Restaurant successfully linked to franchise network.",
-		"restaurant_id": claims.RestaurantID,
+		"success":        true,
+		"message":        "Restaurant successfully linked to franchise network.",
+		"restaurant_id":  claims.RestaurantID,
+		"franchise_id":   invite.FranchiseID,
+		"franchise_name": franchiseName,
 	})
 }
 
@@ -1819,47 +2348,95 @@ func (h *APIHandler) CreateFranchiseOutlet(w http.ResponseWriter, r *http.Reques
 	}
 
 	var req struct {
-		Name  string `json:"name"`
-		Slug  string `json:"slug"`
-		Email string `json:"email"`
+		Name            string `json:"name"`
+		Slug            string `json:"slug"`
+		VenueType       string `json:"venue_type"`
+		AdminName       string `json:"admin_name"`
+		Email           string `json:"email"`
+		Password        string `json:"password"`
+		Phone           string `json:"phone"`
+		TableCount      int    `json:"table_count"`
+		DefaultCapacity int    `json:"default_capacity"`
 	}
 	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
 		errorResponse(w, http.StatusBadRequest, "invalid request payload")
 		return
 	}
 
-	newID := uuid.New()
-	now := time.Now()
+	name := strings.TrimSpace(req.Name)
+	if name == "" {
+		errorResponse(w, http.StatusBadRequest, "outlet name is required")
+		return
+	}
+	adminEmail := strings.ToLower(strings.TrimSpace(req.Email))
+	if adminEmail == "" {
+		errorResponse(w, http.StatusBadRequest, "admin email is required")
+		return
+	}
 
-	newRest := restaurant.Restaurant{
-		ID:                 newID,
-		Name:               req.Name,
-		Slug:               req.Slug,
-		Status:             restaurant.StatusActive,
-		SubscriptionPlan:   "PRO_30D",
-		SubscriptionStatus: "ACTIVE",
-		SubscriptionEndAt:  now.Add(30 * 24 * time.Hour),
-		CreatedAt:          now,
-		UpdatedAt:          now,
+	fr, err := h.franchiseForCaller(r.Context(), claims, true)
+	if err != nil || fr == nil {
+		errorResponse(w, http.StatusBadRequest, "restaurant is not part of a franchise")
+		return
+	}
+
+	// Slug must be available (same check as /public/restaurant/check-handle)
+	slug := strings.ToLower(strings.TrimSpace(req.Slug))
+	slug = strings.TrimPrefix(slug, "@")
+	if slug == "" {
+		slug = strings.ToLower(strings.ReplaceAll(name, " ", "-"))
+	}
+	if slug == "tableos-platform" {
+		errorResponse(w, http.StatusBadRequest, "slug is reserved")
+		return
+	}
+	if existing, _ := h.repo.GetRestaurantBySlug(r.Context(), slug); existing != nil {
+		errorResponse(w, http.StatusConflict, "slug is already taken")
+		return
+	}
+	// Admin email must be globally unique
+	if existing, _ := h.repo.GetStaffByEmail(r.Context(), adminEmail); existing != nil {
+		errorResponse(w, http.StatusConflict, "email is already registered")
+		return
+	}
+
+	onboard := &OnboardRestaurantRequest{
+		RestaurantName:  name,
+		VenueType:       req.VenueType,
+		Slug:            slug,
+		TableCount:      req.TableCount,
+		DefaultCapacity: req.DefaultCapacity,
+	}
+	onboard.Admin.Name = req.AdminName
+	onboard.Admin.Email = adminEmail
+	onboard.Admin.Password = req.Password
+	onboard.Admin.Phone = req.Phone
+
+	result, err := h.provisionRestaurant(r.Context(), onboard, &fr.ID, restaurant.RoleRestaurantAdmin, "EMP-ADM-001")
+	if err != nil {
+		errorResponse(w, http.StatusInternalServerError, err.Error())
+		return
 	}
 
 	jsonResponse(w, http.StatusOK, map[string]interface{}{
 		"success":       true,
-		"restaurant_id": newRest.ID.String(),
-		"name":          newRest.Name,
-		"slug":          newRest.Slug,
+		"restaurant_id": result.Restaurant.ID,
+		"name":          result.Restaurant.Name,
+		"slug":          result.Restaurant.Slug,
+		"admin_email":   result.Admin.Email,
+		"franchise_id":  fr.ID,
 		"message":       "New franchise outlet created & attached successfully.",
 	})
 }
 
 type StaffStartSessionRequest struct {
-	TableID        string `json:"table_id,omitempty"`
-	TableNumber    string `json:"table_number,omitempty"`
-	TableToken     string `json:"table_token,omitempty"`
-	CustomerName   string `json:"customer_name,omitempty"`
-	CustomerPhone  string `json:"customer_phone,omitempty"`
-	GuestCount     int    `json:"guest_count,omitempty"`
-	VehicleNumber  string `json:"vehicle_number,omitempty"`
+	TableID       string `json:"table_id,omitempty"`
+	TableNumber   string `json:"table_number,omitempty"`
+	TableToken    string `json:"table_token,omitempty"`
+	CustomerName  string `json:"customer_name,omitempty"`
+	CustomerPhone string `json:"customer_phone,omitempty"`
+	GuestCount    int    `json:"guest_count,omitempty"`
+	VehicleNumber string `json:"vehicle_number,omitempty"`
 }
 
 func (h *APIHandler) StaffStartSession(w http.ResponseWriter, r *http.Request) {
@@ -1947,6 +2524,15 @@ func (h *APIHandler) StaffStartSession(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	// The waiter who seats the guests owns the table session
+	if cerr := h.sessionService.ClaimForWaiter(r.Context(), sess.ID, claims.StaffID, claims.Role, claims.Name); cerr != nil {
+		var assignErr *service.ErrTableAssignedToOtherWaiter
+		if errors.As(cerr, &assignErr) {
+			errorResponse(w, http.StatusForbidden, cerr.Error())
+			return
+		}
+	}
+
 	// Auto-verify since staff is physically seating the walk-in guests
 	now := time.Now()
 	sess.Status = session.StateOpenVerified
@@ -1958,12 +2544,15 @@ func (h *APIHandler) StaffStartSession(w http.ResponseWriter, r *http.Request) {
 }
 
 type PendingOrderResponse struct {
-	Order         order.Order `json:"order"`
-	TableNumber   string      `json:"table_number"`
-	CustomerName  string      `json:"customer_name,omitempty"`
-	CustomerPhone string      `json:"customer_phone,omitempty"`
-	GuestCount    int         `json:"guest_count,omitempty"`
-	VehicleNumber string      `json:"vehicle_number,omitempty"`
+	Order              order.Order `json:"order"`
+	TableNumber        string      `json:"table_number"`
+	TableCapacity      int         `json:"table_capacity,omitempty"`
+	CustomerName       string      `json:"customer_name,omitempty"`
+	CustomerPhone      string      `json:"customer_phone,omitempty"`
+	GuestCount         int         `json:"guest_count,omitempty"`
+	VehicleNumber      string      `json:"vehicle_number,omitempty"`
+	AssignedWaiterID   *uuid.UUID  `json:"assigned_waiter_id,omitempty"`
+	AssignedWaiterName string      `json:"assigned_waiter_name,omitempty"`
 }
 
 func (h *APIHandler) GetPendingOrders(w http.ResponseWriter, r *http.Request) {
@@ -1979,8 +2568,25 @@ func (h *APIHandler) GetPendingOrders(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	res := make([]PendingOrderResponse, len(orders))
-	for i, ord := range orders {
+	// Fetch active sessions & tables once for waiter-assignment filtering and capacity
+	sessions, _ := h.repo.ListActiveSessions(r.Context(), claims.RestaurantID)
+	sessionByID := make(map[uuid.UUID]session.DiningSession, len(sessions))
+	for _, s := range sessions {
+		sessionByID[s.ID] = s
+	}
+	tables, _ := h.repo.ListTables(r.Context(), claims.RestaurantID)
+	tableByID := make(map[uuid.UUID]restaurant.Table, len(tables))
+	for _, t := range tables {
+		tableByID[t.ID] = t
+	}
+	isWaiter := claims.Role == string(restaurant.RoleWaiter)
+
+	res := make([]PendingOrderResponse, 0, len(orders))
+	for _, ord := range orders {
+		sess, hasSess := sessionByID[ord.SessionID]
+		if isWaiter && hasSess && sess.AssignedWaiterID != nil && *sess.AssignedWaiterID != claims.StaffID {
+			continue
+		}
 		tableNum := ord.TableNumber
 		if tableNum == "" {
 			tableNum = "Table 1"
@@ -1993,7 +2599,7 @@ func (h *APIHandler) GetPendingOrders(w http.ResponseWriter, r *http.Request) {
 		if guestCount <= 0 {
 			guestCount = 1
 		}
-		res[i] = PendingOrderResponse{
+		entry := PendingOrderResponse{
 			Order:         ord,
 			TableNumber:   tableNum,
 			CustomerName:  custName,
@@ -2001,6 +2607,14 @@ func (h *APIHandler) GetPendingOrders(w http.ResponseWriter, r *http.Request) {
 			GuestCount:    guestCount,
 			VehicleNumber: ord.VehicleNumber,
 		}
+		if hasSess {
+			entry.AssignedWaiterID = sess.AssignedWaiterID
+			entry.AssignedWaiterName = sess.AssignedWaiterName
+			if tbl, ok := tableByID[sess.TableID]; ok && tbl.Capacity > 0 {
+				entry.TableCapacity = tbl.Capacity
+			}
+		}
+		res = append(res, entry)
 	}
 
 	jsonResponse(w, http.StatusOK, res)
@@ -2016,20 +2630,16 @@ func (h *APIHandler) GetRestaurantOrders(w http.ResponseWriter, r *http.Request)
 		return
 	}
 
-	if claims.CanAccessMultiOutlets() {
-		if restParam != "" && restParam != "ALL" {
-			if parsed := h.resolveRestaurantID(r.Context(), restParam); parsed != uuid.Nil {
-				restaurantID = parsed
-			}
-		}
-	} else {
-		restaurantID = claims.RestaurantID
-		if restParam != "" && restParam != "ALL" {
-			requestedID := h.resolveRestaurantID(r.Context(), restParam)
-			if requestedID != uuid.Nil && requestedID != restaurantID {
+	restaurantID = claims.RestaurantID
+	if restParam == "ALL" && claims.CanAccessMultiOutlets() {
+		restaurantID = uuid.Nil // aggregated below, restricted to accessible restaurants
+	} else if restParam != "" {
+		if parsed := h.resolveRestaurantID(r.Context(), restParam); parsed != uuid.Nil {
+			if !h.canAccessRestaurant(r.Context(), claims, parsed) {
 				errorResponse(w, http.StatusForbidden, "unauthorized access to orders of another restaurant")
 				return
 			}
+			restaurantID = parsed
 		}
 	}
 
@@ -2062,6 +2672,9 @@ func (h *APIHandler) GetRestaurantOrders(w http.ResponseWriter, r *http.Request)
 		}
 		orders = make([]order.Order, 0)
 		for _, rest := range rests {
+			if rest.ID == restaurant.PlatformRestaurantID || !h.canAccessRestaurant(r.Context(), claims, rest.ID) {
+				continue
+			}
 			oList, e := h.orderService.ListOrders(r.Context(), rest.ID, limit, startDate, endDate)
 			if e == nil && len(oList) > 0 {
 				orders = append(orders, oList...)
@@ -2305,6 +2918,13 @@ func (h *APIHandler) GetPlatformAnalytics(w http.ResponseWriter, r *http.Request
 		errorResponse(w, http.StatusInternalServerError, err.Error())
 		return
 	}
+	filtered := restaurants[:0]
+	for _, rest := range restaurants {
+		if rest.ID != restaurant.PlatformRestaurantID {
+			filtered = append(filtered, rest)
+		}
+	}
+	restaurants = filtered
 
 	var totalPlatformGMVMinor int64
 	var totalPlatformFeeMinor int64
@@ -2322,10 +2942,10 @@ func (h *APIHandler) GetPlatformAnalytics(w http.ResponseWriter, r *http.Request
 	}
 
 	jsonResponse(w, http.StatusOK, map[string]interface{}{
-		"total_restaurants":         len(restaurants),
-		"active_restaurants":        activeRestaurantCount,
-		"platform_gross_sales":      money.New(totalPlatformGMVMinor),
-		"platform_fee_revenue":      money.New(totalPlatformFeeMinor),
+		"total_restaurants":    len(restaurants),
+		"active_restaurants":   activeRestaurantCount,
+		"platform_gross_sales": money.New(totalPlatformGMVMinor),
+		"platform_fee_revenue": money.New(totalPlatformFeeMinor),
 	})
 }
 
@@ -2335,6 +2955,13 @@ func (h *APIHandler) GetFraudReviewQueue(w http.ResponseWriter, r *http.Request)
 		errorResponse(w, http.StatusInternalServerError, err.Error())
 		return
 	}
+	restFiltered := restaurants[:0]
+	for _, rest := range restaurants {
+		if rest.ID != restaurant.PlatformRestaurantID {
+			restFiltered = append(restFiltered, rest)
+		}
+	}
+	restaurants = restFiltered
 
 	type FraudFlag struct {
 		RestaurantID   uuid.UUID `json:"restaurant_id"`
@@ -2729,41 +3356,44 @@ func (h *APIHandler) AIQueryMenu(w http.ResponseWriter, r *http.Request) {
 	})
 }
 
-
-
 // ---------------- Public Restaurant Onboarding & Tables ----------------
 
 type OnboardRestaurantRequest struct {
-	RestaurantName string `json:"restaurant_name"`
-	VenueType      string `json:"venue_type"`
-	Slug           string `json:"slug"`
-	Theme          string `json:"theme"`
-	LegalName      string `json:"legal_name"`
-	GSTIN          string `json:"gstin"`
-	Phone          string `json:"phone"`
-	Email          string `json:"email"`
-	Address        string `json:"address"`
-	Cuisine        string `json:"cuisine"`
-	Currency       string `json:"currency"`
-	Admin          struct {
+	RestaurantName      string `json:"restaurant_name"`
+	VenueType           string `json:"venue_type"`
+	Slug                string `json:"slug"`
+	Theme               string `json:"theme"`
+	LegalName           string `json:"legal_name"`
+	GSTIN               string `json:"gstin"`
+	Phone               string `json:"phone"`
+	Email               string `json:"email"`
+	Address             string `json:"address"`
+	Cuisine             string `json:"cuisine"`
+	Currency            string `json:"currency"`
+	OwnershipType       string `json:"ownership_type"`        // "SINGLE" (default) | "FRANCHISE" | "FRANCHISE_OUTLET"
+	FranchiseName       string `json:"franchise_name"`        // used when ownership_type=FRANCHISE
+	FranchiseInviteCode string `json:"franchise_invite_code"` // used when ownership_type=FRANCHISE_OUTLET
+	Admin               struct {
 		Name     string `json:"name"`
 		Email    string `json:"email"`
 		Password string `json:"password"`
 		Phone    string `json:"phone"`
 	} `json:"admin"`
-	TableCount int `json:"table_count"`
-	Tables     []struct {
+	TableCount      int `json:"table_count"`
+	DefaultCapacity int `json:"default_capacity"`
+	Tables          []struct {
 		TableNumber string `json:"table_number"`
 		TableToken  string `json:"table_token"`
 		Capacity    int    `json:"capacity"`
 	} `json:"tables"`
 	MenuItems []struct {
-		Name        string `json:"name"`
-		Category    string `json:"category"`
-		Price       int64  `json:"price"`
-		PriceMinor  int64  `json:"price_minor"`
-		Dietary     string `json:"dietary"`
-		Description string `json:"description"`
+		Name        string         `json:"name"`
+		Category    string         `json:"category"`
+		Price       int64          `json:"price"`
+		PriceMinor  int64          `json:"price_minor"`
+		Dietary     string         `json:"dietary"`
+		Description string         `json:"description"`
+		Variants    []variantInput `json:"variants"`
 	} `json:"menu_items"`
 	Staff []struct {
 		Name       string          `json:"name"`
@@ -2775,25 +3405,21 @@ type OnboardRestaurantRequest struct {
 	} `json:"staff"`
 }
 
-func (h *APIHandler) OnboardRestaurant(w http.ResponseWriter, r *http.Request) {
-	var req OnboardRestaurantRequest
-	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
-		errorResponse(w, http.StatusBadRequest, "invalid request payload")
-		return
-	}
+type onboardProvisionResult struct {
+	Restaurant  *restaurant.Restaurant
+	Admin       *restaurant.StaffUser
+	Tables      []restaurant.Table
+	DishesCount int
+	StaffCount  int
+}
 
+// provisionRestaurant creates the restaurant record, settings, admin account,
+// tables, menu, staff roster and onboarding record. Shared by public onboarding
+// and franchise outlet creation so both stay in lockstep.
+func (h *APIHandler) provisionRestaurant(ctx context.Context, req *OnboardRestaurantRequest, franchiseID *uuid.UUID, adminRole restaurant.Role, adminEmployeeID string) (*onboardProvisionResult, error) {
 	name := strings.TrimSpace(req.RestaurantName)
-	if name == "" {
-		errorResponse(w, http.StatusBadRequest, "restaurant name is required")
-		return
-	}
 
 	adminEmail := strings.ToLower(strings.TrimSpace(req.Admin.Email))
-	if adminEmail == "" {
-		errorResponse(w, http.StatusBadRequest, "admin email is required")
-		return
-	}
-
 	adminPW := strings.TrimSpace(req.Admin.Password)
 	if adminPW == "" {
 		adminPW = "AdminPass123!"
@@ -2803,10 +3429,6 @@ func (h *APIHandler) OnboardRestaurant(w http.ResponseWriter, r *http.Request) {
 	gstin := strings.TrimSpace(req.GSTIN)
 	if gstin == "" {
 		gstin = "07AABCG1234F1Z5"
-	}
-	curr := strings.TrimSpace(req.Currency)
-	if curr == "" {
-		curr = "INR"
 	}
 
 	now := time.Now()
@@ -2843,24 +3465,23 @@ func (h *APIHandler) OnboardRestaurant(w http.ResponseWriter, r *http.Request) {
 		SettlementBankDetails: strings.TrimSpace(req.LegalName),
 		Status:                restaurant.StatusActive,
 		Timezone:              "Asia/Kolkata",
+		FranchiseID:           franchiseID,
 		CreatedAt:             now,
 		UpdatedAt:             now,
 	}
 
-	if err := h.repo.CreateRestaurant(r.Context(), rest); err != nil {
-		errorResponse(w, http.StatusInternalServerError, "failed to register restaurant: "+err.Error())
-		return
+	if err := h.repo.CreateRestaurant(ctx, rest); err != nil {
+		return nil, fmt.Errorf("failed to register restaurant: %w", err)
 	}
 
 	// 1. Settings
 	settings := restaurant.DefaultSettings(restID)
-	_ = h.repo.UpdateSettings(r.Context(), &settings)
+	_ = h.repo.UpdateSettings(ctx, &settings)
 
 	// 2. Admin User
 	hash, err := bcrypt.GenerateFromPassword([]byte(adminPW), bcrypt.DefaultCost)
 	if err != nil {
-		errorResponse(w, http.StatusInternalServerError, "failed to hash admin password")
-		return
+		return nil, fmt.Errorf("failed to hash admin password")
 	}
 
 	adminID := uuid.New()
@@ -2868,26 +3489,39 @@ func (h *APIHandler) OnboardRestaurant(w http.ResponseWriter, r *http.Request) {
 	if adminName == "" {
 		adminName = "Restaurant Owner"
 	}
+	if adminEmployeeID == "" {
+		adminEmployeeID = "EMP-ADM-001"
+	}
 
 	adminUser := &restaurant.StaffUser{
 		ID:           adminID,
 		RestaurantID: restID,
-		EmployeeID:   "EMP-ADM-001",
+		EmployeeID:   adminEmployeeID,
 		Name:         adminName,
 		Phone:        strings.TrimSpace(req.Admin.Phone),
 		Email:        adminEmail,
 		PasswordHash: string(hash),
-		Role:         restaurant.RoleRestaurantAdmin,
+		Role:         adminRole,
 		IsActive:     true,
 		CreatedAt:    now,
 		UpdatedAt:    now,
 	}
-	if err := h.repo.CreateStaff(r.Context(), adminUser); err != nil {
-		errorResponse(w, http.StatusInternalServerError, "failed to provision admin: "+err.Error())
-		return
+	if err := h.repo.CreateStaff(ctx, adminUser); err != nil {
+		return nil, fmt.Errorf("failed to provision admin: %w", err)
 	}
 
 	// 3. Tables / Rooms / Universal Drive-In Station
+	// Seating capacity resolution: per-table capacity > default_capacity > 4
+	defaultCapacity := req.DefaultCapacity
+	if defaultCapacity <= 0 {
+		defaultCapacity = 4
+	}
+	resolveCapacity := func(perTable int) int {
+		if perTable > 0 {
+			return perTable
+		}
+		return defaultCapacity
+	}
 	createdTables := make([]restaurant.Table, 0)
 	if len(req.Tables) > 0 {
 		for _, t := range req.Tables {
@@ -2916,11 +3550,12 @@ func (h *APIHandler) OnboardRestaurant(w http.ResponseWriter, r *http.Request) {
 				RestaurantID: restID,
 				TableNumber:  tblNum,
 				TableToken:   tblToken,
+				Capacity:     resolveCapacity(t.Capacity),
 				IsActive:     true,
 				CreatedAt:    now,
 				UpdatedAt:    now,
 			}
-			_ = h.repo.CreateTable(r.Context(), tbl)
+			_ = h.repo.CreateTable(ctx, tbl)
 			createdTables = append(createdTables, *tbl)
 		}
 	} else if venueType == restaurant.VenueTypeDriveIn {
@@ -2931,11 +3566,12 @@ func (h *APIHandler) OnboardRestaurant(w http.ResponseWriter, r *http.Request) {
 			RestaurantID: restID,
 			TableNumber:  "Drive-In Universal",
 			TableToken:   tblToken,
+			Capacity:     defaultCapacity,
 			IsActive:     true,
 			CreatedAt:    now,
 			UpdatedAt:    now,
 		}
-		_ = h.repo.CreateTable(r.Context(), tbl)
+		_ = h.repo.CreateTable(ctx, tbl)
 		createdTables = append(createdTables, *tbl)
 	} else if venueType == restaurant.VenueTypeHotel {
 		// Hotel: Rooms 101 to 100+count
@@ -2950,11 +3586,12 @@ func (h *APIHandler) OnboardRestaurant(w http.ResponseWriter, r *http.Request) {
 				RestaurantID: restID,
 				TableNumber:  fmt.Sprintf("Room %d", 100+i),
 				TableToken:   tblToken,
+				Capacity:     defaultCapacity,
 				IsActive:     true,
 				CreatedAt:    now,
 				UpdatedAt:    now,
 			}
-			_ = h.repo.CreateTable(r.Context(), tbl)
+			_ = h.repo.CreateTable(ctx, tbl)
 			createdTables = append(createdTables, *tbl)
 		}
 	} else {
@@ -2970,11 +3607,12 @@ func (h *APIHandler) OnboardRestaurant(w http.ResponseWriter, r *http.Request) {
 				RestaurantID: restID,
 				TableNumber:  fmt.Sprintf("Table %d", i),
 				TableToken:   tblToken,
+				Capacity:     defaultCapacity,
 				IsActive:     true,
 				CreatedAt:    now,
 				UpdatedAt:    now,
 			}
-			_ = h.repo.CreateTable(r.Context(), tbl)
+			_ = h.repo.CreateTable(ctx, tbl)
 			createdTables = append(createdTables, *tbl)
 		}
 	}
@@ -2999,8 +3637,13 @@ func (h *APIHandler) OnboardRestaurant(w http.ResponseWriter, r *http.Request) {
 				CreatedAt:    now,
 				UpdatedAt:    now,
 			}
-			_ = h.repo.CreateCategory(r.Context(), cat)
+			_ = h.repo.CreateCategory(ctx, cat)
 			categoryMap[catKey] = catID
+		}
+
+		variants, verr := buildVariants(item.Variants, true)
+		if verr != nil {
+			return nil, verr
 		}
 
 		priceMinor := item.PriceMinor
@@ -3009,6 +3652,13 @@ func (h *APIHandler) OnboardRestaurant(w http.ResponseWriter, r *http.Request) {
 				priceMinor = item.Price * 100
 			} else {
 				priceMinor = item.Price
+			}
+		}
+		if priceMinor <= 0 && len(variants) > 0 {
+			for _, v := range variants {
+				if v.Price.AmountMinorUnits > priceMinor {
+					priceMinor = v.Price.AmountMinorUnits
+				}
 			}
 		}
 		if priceMinor <= 0 {
@@ -3031,10 +3681,11 @@ func (h *APIHandler) OnboardRestaurant(w http.ResponseWriter, r *http.Request) {
 			HSNSACCode:   "996331",
 			CGSTRateBps:  250,
 			SGSTRateBps:  250,
+			Variants:     variants,
 			CreatedAt:    now.Add(time.Duration(i) * time.Millisecond),
 			UpdatedAt:    now,
 		}
-		_ = h.repo.CreateMenuItem(r.Context(), mi)
+		_ = h.repo.CreateMenuItem(ctx, mi)
 		dishesCount++
 	}
 
@@ -3087,12 +3738,12 @@ func (h *APIHandler) OnboardRestaurant(w http.ResponseWriter, r *http.Request) {
 			CreatedAt:    now,
 			UpdatedAt:    now,
 		}
-		_ = h.repo.CreateStaff(r.Context(), stUser)
+		_ = h.repo.CreateStaff(ctx, stUser)
 		staffCount++
 	}
 
 	// 6. Complete Onboarding
-	_ = h.repo.UpdateOnboarding(r.Context(), &restaurant.RestaurantOnboarding{
+	_ = h.repo.UpdateOnboarding(ctx, &restaurant.RestaurantOnboarding{
 		RestaurantID:   restID,
 		CurrentStep:    restaurant.StepGoLive,
 		StepsCompleted: []restaurant.OnboardingStep{restaurant.StepProfileSetup, restaurant.StepTableSetup, restaurant.StepMenuSetup, restaurant.StepStaffSetup, restaurant.StepPaymentSetup, restaurant.StepPolicySetup, restaurant.StepTestOrder, restaurant.StepGoLive},
@@ -3101,36 +3752,149 @@ func (h *APIHandler) OnboardRestaurant(w http.ResponseWriter, r *http.Request) {
 		UpdatedAt:      now,
 	})
 
+	return &onboardProvisionResult{
+		Restaurant:  rest,
+		Admin:       adminUser,
+		Tables:      createdTables,
+		DishesCount: dishesCount,
+		StaffCount:  staffCount,
+	}, nil
+}
+
+func (h *APIHandler) OnboardRestaurant(w http.ResponseWriter, r *http.Request) {
+	var req OnboardRestaurantRequest
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		errorResponse(w, http.StatusBadRequest, "invalid request payload")
+		return
+	}
+
+	name := strings.TrimSpace(req.RestaurantName)
+	if name == "" {
+		errorResponse(w, http.StatusBadRequest, "restaurant name is required")
+		return
+	}
+
+	adminEmail := strings.ToLower(strings.TrimSpace(req.Admin.Email))
+	if adminEmail == "" {
+		errorResponse(w, http.StatusBadRequest, "admin email is required")
+		return
+	}
+
+	// Resolve ownership model before creating anything
+	ownershipType := strings.ToUpper(strings.TrimSpace(req.OwnershipType))
+	if ownershipType == "" {
+		ownershipType = "SINGLE"
+	}
+
+	var franchiseID *uuid.UUID
+	var franchiseName string
+	adminRole := restaurant.RoleRestaurantAdmin
+	adminEmployeeID := "EMP-ADM-001"
+
+	switch ownershipType {
+	case "FRANCHISE":
+		// A brand-new franchise group; this restaurant is its first outlet
+		fname := strings.TrimSpace(req.FranchiseName)
+		if fname == "" {
+			fname = name
+		}
+		now := time.Now()
+		fr := &restaurant.Franchise{
+			ID:        uuid.New(),
+			Name:      fname,
+			CreatedAt: now,
+			UpdatedAt: now,
+		}
+		fid := fr.ID
+		franchiseID = &fid
+		franchiseName = fname
+		adminRole = restaurant.RoleFranchiseOwner
+		adminEmployeeID = "EMP-FRN-001"
+		if err := h.repo.CreateFranchise(r.Context(), fr); err != nil {
+			errorResponse(w, http.StatusInternalServerError, "failed to create franchise")
+			return
+		}
+
+	case "FRANCHISE_OUTLET":
+		// Validate the invite code FIRST — before any restaurant is created
+		code := strings.ToUpper(strings.TrimSpace(req.FranchiseInviteCode))
+		invite, err := h.repo.GetFranchiseInviteCode(r.Context(), code)
+		if err != nil || invite == nil || invite.UsedAt != nil || time.Now().After(invite.ExpiresAt) {
+			errorResponse(w, http.StatusBadRequest, "invalid or expired franchise invite code")
+			return
+		}
+		fid := invite.FranchiseID
+		franchiseID = &fid
+		if fr, ferr := h.repo.GetFranchiseByID(r.Context(), invite.FranchiseID); ferr == nil && fr != nil {
+			franchiseName = fr.Name
+		}
+		adminRole = restaurant.RoleRestaurantAdmin
+
+	case "SINGLE":
+		// standalone restaurant
+
+	default:
+		errorResponse(w, http.StatusBadRequest, "ownership_type must be SINGLE, FRANCHISE or FRANCHISE_OUTLET")
+		return
+	}
+
+	result, err := h.provisionRestaurant(r.Context(), &req, franchiseID, adminRole, adminEmployeeID)
+	if err != nil {
+		errorResponse(w, http.StatusInternalServerError, err.Error())
+		return
+	}
+	rest := result.Restaurant
+
+	// FRANCHISE: record the provisioned admin as franchise owner
+	if ownershipType == "FRANCHISE" && franchiseID != nil {
+		if fr, ferr := h.repo.GetFranchiseByID(r.Context(), *franchiseID); ferr == nil && fr != nil {
+			fr.OwnerStaffID = &result.Admin.ID
+			_ = h.repo.UpdateFranchise(r.Context(), fr)
+		}
+	}
+
+	// FRANCHISE_OUTLET: consume the single-use invite code
+	if ownershipType == "FRANCHISE_OUTLET" {
+		code := strings.ToUpper(strings.TrimSpace(req.FranchiseInviteCode))
+		_ = h.repo.MarkFranchiseInviteCodeUsed(r.Context(), code, rest.ID)
+	}
+
 	// 7. Generate Admin JWT Token
 	token, _ := crypto.GenerateFullStaffJWT(
 		h.getJWTSecret(),
-		adminUser.ID,
-		restID,
-		adminUser.EmployeeID,
-		adminUser.Name,
-		string(adminUser.Role),
+		result.Admin.ID,
+		rest.ID,
+		result.Admin.EmployeeID,
+		result.Admin.Name,
+		string(result.Admin.Role),
 		false,
 		7*24*time.Hour,
 	)
 
-	jsonResponse(w, http.StatusCreated, map[string]interface{}{
+	resp := map[string]interface{}{
 		"token":           token,
-		"restaurant_id":   restID,
+		"restaurant_id":   rest.ID,
 		"restaurant_name": rest.Name,
 		"venue_type":      rest.VenueType,
 		"restaurant":      rest,
 		"admin": map[string]interface{}{
-			"id":          adminUser.ID,
-			"name":        adminUser.Name,
-			"email":       adminUser.Email,
-			"employee_id": adminUser.EmployeeID,
-			"role":        adminUser.Role,
+			"id":          result.Admin.ID,
+			"name":        result.Admin.Name,
+			"email":       result.Admin.Email,
+			"employee_id": result.Admin.EmployeeID,
+			"role":        result.Admin.Role,
 		},
-		"tables_count": len(createdTables),
-		"dishes_count": dishesCount,
-		"staff_count":  staffCount,
-		"tables":       createdTables,
-	})
+		"tables_count":   len(result.Tables),
+		"dishes_count":   result.DishesCount,
+		"staff_count":    result.StaffCount,
+		"tables":         result.Tables,
+		"ownership_type": ownershipType,
+	}
+	if franchiseID != nil {
+		resp["franchise_id"] = *franchiseID
+		resp["franchise_name"] = franchiseName
+	}
+	jsonResponse(w, http.StatusCreated, resp)
 }
 
 func (h *APIHandler) CreateTable(w http.ResponseWriter, r *http.Request) {
@@ -3147,6 +3911,11 @@ func (h *APIHandler) CreateTable(w http.ResponseWriter, r *http.Request) {
 	}
 	if err := json.NewDecoder(r.Body).Decode(&req); err != nil || strings.TrimSpace(req.TableNumber) == "" {
 		errorResponse(w, http.StatusBadRequest, "valid table number required")
+		return
+	}
+
+	if req.Capacity < 1 || req.Capacity > 50 {
+		errorResponse(w, http.StatusBadRequest, "capacity (number of seats) is required (1-50)")
 		return
 	}
 
@@ -3178,6 +3947,130 @@ func (h *APIHandler) CreateTable(w http.ResponseWriter, r *http.Request) {
 	}
 
 	jsonResponse(w, http.StatusCreated, tbl)
+}
+
+type UpdateTableRequest struct {
+	Capacity    *int    `json:"capacity,omitempty"`
+	TableNumber *string `json:"table_number,omitempty"`
+	IsActive    *bool   `json:"is_active,omitempty"`
+}
+
+func (h *APIHandler) UpdateTable(w http.ResponseWriter, r *http.Request) {
+	claims, ok := middleware.GetStaffClaimsFromContext(r.Context())
+	if !ok {
+		errorResponse(w, http.StatusUnauthorized, "unauthorized staff")
+		return
+	}
+
+	tableID, err := uuid.Parse(chi.URLParam(r, "id"))
+	if err != nil {
+		errorResponse(w, http.StatusBadRequest, "invalid table ID")
+		return
+	}
+
+	tbl, err := h.repo.GetTableByID(r.Context(), tableID)
+	if err != nil || tbl == nil {
+		errorResponse(w, http.StatusNotFound, "table not found")
+		return
+	}
+	if !h.canAccessRestaurant(r.Context(), claims, tbl.RestaurantID) {
+		errorResponse(w, http.StatusForbidden, "forbidden: table belongs to another restaurant")
+		return
+	}
+
+	var req UpdateTableRequest
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		errorResponse(w, http.StatusBadRequest, "invalid request body")
+		return
+	}
+
+	if req.Capacity != nil {
+		if *req.Capacity < 1 || *req.Capacity > 50 {
+			errorResponse(w, http.StatusBadRequest, "capacity (number of seats) is required (1-50)")
+			return
+		}
+		tbl.Capacity = *req.Capacity
+	}
+	if req.TableNumber != nil && strings.TrimSpace(*req.TableNumber) != "" {
+		tbl.TableNumber = strings.TrimSpace(*req.TableNumber)
+	}
+	if req.IsActive != nil {
+		tbl.IsActive = *req.IsActive
+	}
+
+	if err := h.repo.UpdateTable(r.Context(), tbl); err != nil {
+		errorResponse(w, http.StatusInternalServerError, err.Error())
+		return
+	}
+
+	jsonResponse(w, http.StatusOK, tbl)
+}
+
+type AssignWaiterRequest struct {
+	StaffID *uuid.UUID `json:"staff_id"`
+}
+
+func (h *APIHandler) AssignWaiter(w http.ResponseWriter, r *http.Request) {
+	claims, ok := middleware.GetStaffClaimsFromContext(r.Context())
+	if !ok {
+		errorResponse(w, http.StatusUnauthorized, "unauthorized staff")
+		return
+	}
+
+	switch claims.Role {
+	case string(restaurant.RoleManager), string(restaurant.RoleRestaurantAdmin),
+		string(restaurant.RoleRestaurantOwner), string(restaurant.RoleFranchiseOwner),
+		string(restaurant.RoleSuperAdmin):
+	default:
+		errorResponse(w, http.StatusForbidden, "forbidden: insufficient role permissions")
+		return
+	}
+
+	sessionID, err := uuid.Parse(chi.URLParam(r, "id"))
+	if err != nil {
+		errorResponse(w, http.StatusBadRequest, "invalid session ID")
+		return
+	}
+
+	sess, err := h.sessionService.GetSession(r.Context(), sessionID)
+	if err != nil || sess == nil {
+		errorResponse(w, http.StatusNotFound, "session not found")
+		return
+	}
+	if !h.canAccessRestaurant(r.Context(), claims, sess.RestaurantID) {
+		errorResponse(w, http.StatusForbidden, "forbidden: session belongs to another restaurant")
+		return
+	}
+
+	var req AssignWaiterRequest
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		errorResponse(w, http.StatusBadRequest, "invalid request body")
+		return
+	}
+
+	if req.StaffID == nil || *req.StaffID == uuid.Nil {
+		sess.AssignedWaiterID = nil
+		sess.AssignedWaiterName = ""
+	} else {
+		staff, serr := h.repo.GetStaffByID(r.Context(), *req.StaffID)
+		if serr != nil || staff == nil || staff.RestaurantID != sess.RestaurantID || !staff.IsActive {
+			errorResponse(w, http.StatusBadRequest, "staff must be an active waiter of this restaurant")
+			return
+		}
+		if staff.Role != restaurant.RoleWaiter {
+			errorResponse(w, http.StatusBadRequest, "staff must be an active waiter of this restaurant")
+			return
+		}
+		sess.AssignedWaiterID = req.StaffID
+		sess.AssignedWaiterName = staff.Name
+	}
+
+	if err := h.repo.UpdateSession(r.Context(), sess); err != nil {
+		errorResponse(w, http.StatusInternalServerError, err.Error())
+		return
+	}
+
+	jsonResponse(w, http.StatusOK, sess)
 }
 
 func (h *APIHandler) GenerateTableToken(w http.ResponseWriter, r *http.Request) {
@@ -3301,4 +4194,3 @@ func (h *APIHandler) GetWSTicket(w http.ResponseWriter, r *http.Request) {
 
 	errorResponse(w, http.StatusUnauthorized, "invalid authorization or session credentials")
 }
-

@@ -46,9 +46,11 @@ type DatabaseConfig struct {
 }
 
 type AuthConfig struct {
-	JWTSecret       string
-	TokenTTLHours   int
-	GuardTokenHours int
+	JWTSecret          string
+	TokenTTLHours      int
+	GuardTokenHours    int
+	SuperAdminEmail    string
+	SuperAdminPassword string
 }
 
 type RazorpayConfig struct {
@@ -120,9 +122,11 @@ func Load(envFiles ...string) (*Config, error) {
 			AllowMemoryFallback: strings.EqualFold(getEnv("ALLOW_MEMORY_FALLBACK", "false"), "true"),
 		},
 		Auth: AuthConfig{
-			JWTSecret:       getEnv("JWT_SECRET", "super-secure-dining-os-jwt-secret-key-32b"),
-			TokenTTLHours:   getEnvInt("AUTH_TOKEN_TTL_HOURS", 24),
-			GuardTokenHours: getEnvInt("GUARD_TOKEN_TTL_HOURS", 12),
+			JWTSecret:          getEnv("JWT_SECRET", "super-secure-dining-os-jwt-secret-key-32b"),
+			TokenTTLHours:      getEnvInt("AUTH_TOKEN_TTL_HOURS", 24),
+			GuardTokenHours:    getEnvInt("GUARD_TOKEN_TTL_HOURS", 12),
+			SuperAdminEmail:    getEnv("SUPER_ADMIN_EMAIL", ""),
+			SuperAdminPassword: getEnv("SUPER_ADMIN_PASSWORD", ""),
 		},
 		Razorpay: RazorpayConfig{
 			KeyID:         getEnv("RAZORPAY_KEY_ID", "rzp_test_sample_key_id"),

@@ -88,6 +88,16 @@ func (s *OrderService) PlaceOrder(ctx context.Context, sessionID uuid.UUID, cart
 		}
 
 		unitPrice := menuItem.Price
+		itemNameSnapshot := menuItem.Name
+		// Optional portion/variant selection (e.g. Half / Full)
+		if item.VariantID != nil && *item.VariantID != uuid.Nil {
+			variant, verr := s.repo.GetMenuItemVariantByID(ctx, *item.VariantID)
+			if verr != nil || variant == nil || variant.MenuItemID != menuItem.ID || !variant.IsAvailable {
+				return nil, nil, fmt.Errorf("invalid or unavailable variant for item %s", menuItem.Name)
+			}
+			unitPrice = variant.Price
+			itemNameSnapshot = fmt.Sprintf("%s (%s)", menuItem.Name, variant.Name)
+		}
 		// Calculate line totals
 		lineTotalMinor := unitPrice.AmountMinorUnits * int64(item.Quantity)
 		lineMoney := money.New(lineTotalMinor)
@@ -109,7 +119,7 @@ func (s *OrderService) PlaceOrder(ctx context.Context, sessionID uuid.UUID, cart
 			OrderID:             orderID,
 			MenuItemID:          menuItem.ID,
 			VariantID:           item.VariantID,
-			ItemNameSnapshot:    menuItem.Name,
+			ItemNameSnapshot:    itemNameSnapshot,
 			Quantity:            item.Quantity,
 			UnitPriceSnapshot:   unitPrice,
 			LineTotal:           lineMoney,
@@ -221,24 +231,24 @@ func (s *OrderService) PlaceOrder(ctx context.Context, sessionID uuid.UUID, cart
 	}
 
 	newOrder := &order.Order{
-		ID:                       orderID,
-		SessionID:                sessionID,
-		RestaurantID:             sess.RestaurantID,
-		SequenceNumber:           sequenceNum,
-		TableNumber:              tableNumber,
-		CustomerName:             customerName,
-		CustomerPhone:            customerPhone,
-		GuestCount:               guestCount,
-		VehicleNumber:            vehicleNumber,
-		Status:                   initialOrderStatus,
-		PlacedAt:                 now,
-		Subtotal:                 money.New(subtotalMinor),
-		TaxTotal:                 money.New(taxTotalMinor),
-		Total:                    totalMoney,
+		ID:                        orderID,
+		SessionID:                 sessionID,
+		RestaurantID:              sess.RestaurantID,
+		SequenceNumber:            sequenceNum,
+		TableNumber:               tableNumber,
+		CustomerName:              customerName,
+		CustomerPhone:             customerPhone,
+		GuestCount:                guestCount,
+		VehicleNumber:             vehicleNumber,
+		Status:                    initialOrderStatus,
+		PlacedAt:                  now,
+		Subtotal:                  money.New(subtotalMinor),
+		TaxTotal:                  money.New(taxTotalMinor),
+		Total:                     totalMoney,
 		CancellationFeeApplicable: false,
-		Version:                  1,
-		CreatedAt:                now,
-		UpdatedAt:                now,
+		Version:                   1,
+		CreatedAt:                 now,
+		UpdatedAt:                 now,
 	}
 
 	if err := s.repo.CreateOrder(ctx, newOrder, orderItems); err != nil {
@@ -637,4 +647,3 @@ func (s *OrderService) ListPendingOrders(ctx context.Context, restaurantID uuid.
 func (s *OrderService) ListOrders(ctx context.Context, restaurantID uuid.UUID, limit int, startDate, endDate *time.Time) ([]order.Order, error) {
 	return s.repo.ListOrders(ctx, restaurantID, limit, startDate, endDate)
 }
-

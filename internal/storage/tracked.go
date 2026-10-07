@@ -245,6 +245,11 @@ func (tr *TrackedRepository) ListTables(ctx context.Context, restaurantID uuid.U
 	return tr.underlying.ListTables(ctx, restaurantID)
 }
 
+func (tr *TrackedRepository) UpdateTable(ctx context.Context, t *restaurant.Table) error {
+	RecordQuery(ctx)
+	return tr.underlying.UpdateTable(ctx, t)
+}
+
 func (tr *TrackedRepository) CreateStaff(ctx context.Context, s *restaurant.StaffUser) error {
 	RecordQuery(ctx)
 	return tr.underlying.CreateStaff(ctx, s)
@@ -323,6 +328,21 @@ func (tr *TrackedRepository) ListMenuItems(ctx context.Context, restaurantID uui
 func (tr *TrackedRepository) UpdateMenuItemAvailability(ctx context.Context, id uuid.UUID, isAvailable bool) error {
 	RecordQuery(ctx)
 	return tr.underlying.UpdateMenuItemAvailability(ctx, id, isAvailable)
+}
+
+func (tr *TrackedRepository) ListVariantsByMenuItemIDs(ctx context.Context, menuItemIDs []uuid.UUID) (map[uuid.UUID][]restaurant.MenuItemVariant, error) {
+	RecordQuery(ctx)
+	return tr.underlying.ListVariantsByMenuItemIDs(ctx, menuItemIDs)
+}
+
+func (tr *TrackedRepository) ReplaceMenuItemVariants(ctx context.Context, menuItemID uuid.UUID, variants []restaurant.MenuItemVariant) error {
+	RecordQuery(ctx)
+	return tr.underlying.ReplaceMenuItemVariants(ctx, menuItemID, variants)
+}
+
+func (tr *TrackedRepository) GetMenuItemVariantByID(ctx context.Context, id uuid.UUID) (*restaurant.MenuItemVariant, error) {
+	RecordQuery(ctx)
+	return tr.underlying.GetMenuItemVariantByID(ctx, id)
 }
 
 func (tr *TrackedRepository) GetSettings(ctx context.Context, restaurantID uuid.UUID) (*restaurant.RestaurantSettings, error) {
@@ -505,3 +525,67 @@ func (tr *TrackedRepository) RenewSubscription(ctx context.Context, restaurantID
 	return tr.underlying.RenewSubscription(ctx, restaurantID, days)
 }
 
+func (tr *TrackedRepository) CreateSubscriptionOTP(ctx context.Context, o *restaurant.SubscriptionOTP) error {
+	RecordQuery(ctx)
+	return tr.underlying.CreateSubscriptionOTP(ctx, o)
+}
+
+func (tr *TrackedRepository) GetActiveSubscriptionOTP(ctx context.Context, restaurantID uuid.UUID) (*restaurant.SubscriptionOTP, error) {
+	RecordQuery(ctx)
+	return tr.underlying.GetActiveSubscriptionOTP(ctx, restaurantID)
+}
+
+func (tr *TrackedRepository) UpdateSubscriptionOTP(ctx context.Context, o *restaurant.SubscriptionOTP) error {
+	RecordQuery(ctx)
+	return tr.underlying.UpdateSubscriptionOTP(ctx, o)
+}
+
+func (tr *TrackedRepository) ListSubscriptionOTPs(ctx context.Context, restaurantID uuid.UUID) ([]restaurant.SubscriptionOTP, error) {
+	RecordQuery(ctx)
+	return tr.underlying.ListSubscriptionOTPs(ctx, restaurantID)
+}
+
+func (tr *TrackedRepository) ConsumeSubscriptionOTP(ctx context.Context, id uuid.UUID) (bool, error) {
+	RecordQuery(ctx)
+	return tr.underlying.ConsumeSubscriptionOTP(ctx, id)
+}
+
+func (tr *TrackedRepository) CreateFranchise(ctx context.Context, f *restaurant.Franchise) error {
+	RecordQuery(ctx)
+	return tr.underlying.CreateFranchise(ctx, f)
+}
+
+func (tr *TrackedRepository) GetFranchiseByID(ctx context.Context, id uuid.UUID) (*restaurant.Franchise, error) {
+	RecordQuery(ctx)
+	return tr.underlying.GetFranchiseByID(ctx, id)
+}
+
+func (tr *TrackedRepository) UpdateFranchise(ctx context.Context, f *restaurant.Franchise) error {
+	RecordQuery(ctx)
+	return tr.underlying.UpdateFranchise(ctx, f)
+}
+
+func (tr *TrackedRepository) ListFranchises(ctx context.Context) ([]restaurant.Franchise, error) {
+	RecordQuery(ctx)
+	return tr.underlying.ListFranchises(ctx)
+}
+
+func (tr *TrackedRepository) ListRestaurantsByFranchise(ctx context.Context, franchiseID uuid.UUID) ([]restaurant.Restaurant, error) {
+	RecordQuery(ctx)
+	return tr.underlying.ListRestaurantsByFranchise(ctx, franchiseID)
+}
+
+func (tr *TrackedRepository) CreateFranchiseInviteCode(ctx context.Context, c *restaurant.FranchiseInviteCode) error {
+	RecordQuery(ctx)
+	return tr.underlying.CreateFranchiseInviteCode(ctx, c)
+}
+
+func (tr *TrackedRepository) GetFranchiseInviteCode(ctx context.Context, code string) (*restaurant.FranchiseInviteCode, error) {
+	RecordQuery(ctx)
+	return tr.underlying.GetFranchiseInviteCode(ctx, code)
+}
+
+func (tr *TrackedRepository) MarkFranchiseInviteCodeUsed(ctx context.Context, code string, restaurantID uuid.UUID) error {
+	RecordQuery(ctx)
+	return tr.underlying.MarkFranchiseInviteCodeUsed(ctx, code, restaurantID)
+}

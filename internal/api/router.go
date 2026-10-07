@@ -72,6 +72,7 @@ func NewRouter(handler *handlers.APIHandler, repo storage.Repository, jwtSecret 
 		api.Post("/session/start", handler.StartSession)
 		api.Get("/public/restaurant/check-handle", handler.CheckHandleAvailability)
 		api.Get("/public/restaurant/{identifier}", handler.LookupRestaurantPublic)
+		api.Get("/public/franchise/invite/{code}", handler.GetFranchiseInviteInfo)
 		api.Post("/staff/login", handler.StaffLogin)
 		api.Post("/auth/staff/login", handler.StaffLogin)
 		api.Post("/auth/forgot-password", handler.ForgotPassword)
@@ -114,6 +115,7 @@ func NewRouter(handler *handlers.APIHandler, repo storage.Repository, jwtSecret 
 			sr.Get("/staff/dashboard/tables", handler.GetTableDashboard)
 			sr.Get("/restaurant/subscription", handler.GetSubscription)
 			sr.Post("/restaurant/subscription/renew", handler.RenewSubscription)
+			sr.Post("/staff/sessions/{id}/assign-waiter", handler.AssignWaiter)
 		})
 
 		// Franchise Governance routes
@@ -197,6 +199,7 @@ func NewRouter(handler *handlers.APIHandler, repo storage.Repository, jwtSecret 
 			// Menu Management (Mutations require ADMIN/OWNER/MANAGER)
 			tr.Post("/restaurant/menu/categories", handler.CreateCategory)
 			tr.Post("/restaurant/menu/items", handler.CreateMenuItem)
+			tr.Put("/restaurant/menu/items/{id}/variants", handler.UpdateMenuItemVariants)
 			tr.Post("/restaurant/menu/ai-catalog", handler.AICatalogMenu)
 			tr.Post("/restaurant/menu/ai-query", handler.AIQueryMenu)
 
@@ -204,6 +207,7 @@ func NewRouter(handler *handlers.APIHandler, repo storage.Repository, jwtSecret 
 			tr.Get("/restaurant/tables", handler.ListTables)
 			tr.Post("/restaurant/tables", handler.CreateTable)
 			tr.Post("/restaurant/tables/generate-token", handler.GenerateTableToken)
+			tr.Put("/restaurant/tables/{id}", handler.UpdateTable)
 
 			// Staff Management
 			tr.Get("/restaurant/staff", handler.ListStaff)
@@ -226,7 +230,13 @@ func NewRouter(handler *handlers.APIHandler, repo storage.Repository, jwtSecret 
 		// Platform Super Admin routes (Strict Platform JWT auth) (§8B)
 		api.Group(func(pr chi.Router) {
 			pr.Use(middleware.PlatformAdminAuth(jwtSecret))
+			pr.Get("/admin/overview", handler.GetAdminOverview)
+			pr.Get("/admin/franchises", handler.GetAdminFranchises)
+			pr.Get("/admin/activity/feed", handler.GetActivityFeed)
 			pr.Get("/admin/restaurants", handler.ListAllRestaurants)
+			pr.Get("/admin/restaurants/{id}/activity", handler.GetRestaurantActivity)
+			pr.Post("/admin/restaurants/{id}/subscription-otp", handler.AdminGenerateSubscriptionOTP)
+			pr.Get("/admin/restaurants/{id}/subscription-otps", handler.AdminListSubscriptionOTPs)
 			pr.Get("/admin/restaurants/{id}", handler.GetRestaurantDetails)
 			pr.Get("/admin/restaurants/{id}/onboarding", handler.GetRestaurantOnboardingAdmin)
 			pr.Get("/admin/analytics/platform", handler.GetPlatformAnalytics)

@@ -108,6 +108,7 @@ type Repository interface {
 	GetTableByID(ctx context.Context, id uuid.UUID) (*restaurant.Table, error)
 	GetTableByToken(ctx context.Context, token string) (*restaurant.Table, error)
 	ListTables(ctx context.Context, restaurantID uuid.UUID) ([]restaurant.Table, error)
+	UpdateTable(ctx context.Context, t *restaurant.Table) error
 
 	CreateStaff(ctx context.Context, s *restaurant.StaffUser) error
 	GetStaffByID(ctx context.Context, id uuid.UUID) (*restaurant.StaffUser, error)
@@ -127,12 +128,33 @@ type Repository interface {
 	GetMenuItemByID(ctx context.Context, id uuid.UUID) (*restaurant.MenuItem, error)
 	ListMenuItems(ctx context.Context, restaurantID uuid.UUID) ([]restaurant.MenuItem, error)
 	UpdateMenuItemAvailability(ctx context.Context, id uuid.UUID, isAvailable bool) error
+	ListVariantsByMenuItemIDs(ctx context.Context, menuItemIDs []uuid.UUID) (map[uuid.UUID][]restaurant.MenuItemVariant, error)
+	ReplaceMenuItemVariants(ctx context.Context, menuItemID uuid.UUID, variants []restaurant.MenuItemVariant) error
+	GetMenuItemVariantByID(ctx context.Context, id uuid.UUID) (*restaurant.MenuItemVariant, error)
 
 	GetSettings(ctx context.Context, restaurantID uuid.UUID) (*restaurant.RestaurantSettings, error)
 	UpdateSettings(ctx context.Context, s *restaurant.RestaurantSettings) error
 
 	GetSubscription(ctx context.Context, restaurantID uuid.UUID) (*restaurant.Restaurant, error)
 	RenewSubscription(ctx context.Context, restaurantID uuid.UUID, days int) (*restaurant.Restaurant, error)
+
+	// Subscription activation OTPs
+	CreateSubscriptionOTP(ctx context.Context, o *restaurant.SubscriptionOTP) error
+	GetActiveSubscriptionOTP(ctx context.Context, restaurantID uuid.UUID) (*restaurant.SubscriptionOTP, error)
+	UpdateSubscriptionOTP(ctx context.Context, o *restaurant.SubscriptionOTP) error
+	ListSubscriptionOTPs(ctx context.Context, restaurantID uuid.UUID) ([]restaurant.SubscriptionOTP, error)
+	// ConsumeSubscriptionOTP atomically flips an OTP ISSUED→USED; returns false if not ISSUED.
+	ConsumeSubscriptionOTP(ctx context.Context, id uuid.UUID) (bool, error)
+
+	// Franchises
+	CreateFranchise(ctx context.Context, f *restaurant.Franchise) error
+	GetFranchiseByID(ctx context.Context, id uuid.UUID) (*restaurant.Franchise, error)
+	UpdateFranchise(ctx context.Context, f *restaurant.Franchise) error
+	ListFranchises(ctx context.Context) ([]restaurant.Franchise, error)
+	ListRestaurantsByFranchise(ctx context.Context, franchiseID uuid.UUID) ([]restaurant.Restaurant, error)
+	CreateFranchiseInviteCode(ctx context.Context, c *restaurant.FranchiseInviteCode) error
+	GetFranchiseInviteCode(ctx context.Context, code string) (*restaurant.FranchiseInviteCode, error)
+	MarkFranchiseInviteCodeUsed(ctx context.Context, code string, restaurantID uuid.UUID) error
 
 	GetOnboarding(ctx context.Context, restaurantID uuid.UUID) (*restaurant.RestaurantOnboarding, error)
 	UpdateOnboarding(ctx context.Context, o *restaurant.RestaurantOnboarding) error

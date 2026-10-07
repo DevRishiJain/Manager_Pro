@@ -115,6 +115,15 @@ func main() {
 	// Wrap repository with query tracker for metrics instrumentation
 	repo = domainstorage.NewTrackedRepository(repo)
 
+	// Bootstrap platform super admin (idempotent; only when configured)
+	if cfg.Auth.SuperAdminEmail != "" && cfg.Auth.SuperAdminPassword != "" {
+		if err := service.EnsureSuperAdmin(context.Background(), repo, cfg.Auth.SuperAdminEmail, cfg.Auth.SuperAdminPassword); err != nil {
+			logger.Error("Failed to ensure super admin", "error", err)
+		} else {
+			logger.Info("Platform super admin ensured", "email", cfg.Auth.SuperAdminEmail)
+		}
+	}
+
 	// Service layers
 	sessionSvc := service.NewSessionService(repo)
 	orderSvc := service.NewOrderService(repo)
