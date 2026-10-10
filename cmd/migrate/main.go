@@ -43,6 +43,11 @@ func main() {
 		"internal/storage/postgres/migrations/007_expenses_inventory_recipes.sql",
 		"internal/storage/postgres/migrations/008_expense_inventory_order_correlation.sql",
 		"internal/storage/postgres/migrations/009_db_optimization_and_cleanup.sql",
+		"internal/storage/postgres/migrations/010_db_optimization_matrix.sql",
+		"internal/storage/postgres/migrations/011_password_resets.sql",
+		"internal/storage/postgres/migrations/012_restaurant_subscriptions.sql",
+		"internal/storage/postgres/migrations/013_franchise_variants_waiter_otp.sql",
+		"internal/storage/postgres/migrations/014_perf_indexes_batch.sql",
 	}
 
 	for _, file := range migrationFiles {

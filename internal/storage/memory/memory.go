@@ -236,6 +236,31 @@ func (m *MemoryRepository) ListActiveSessions(ctx context.Context, restaurantID 
 	return result, nil
 }
 
+func (m *MemoryRepository) ListActiveSessionsAll(ctx context.Context) ([]session.DiningSession, error) {
+	m.mu.RLock()
+	defer m.mu.RUnlock()
+	var result []session.DiningSession
+	for _, s := range m.sessions {
+		if !s.Status.IsTerminal() {
+			result = append(result, *s)
+		}
+	}
+	return result, nil
+}
+
+func (m *MemoryRepository) GetSessionsByIDs(ctx context.Context, ids []uuid.UUID) (map[uuid.UUID]*session.DiningSession, error) {
+	m.mu.RLock()
+	defer m.mu.RUnlock()
+	result := make(map[uuid.UUID]*session.DiningSession)
+	for _, id := range ids {
+		if s, ok := m.sessions[id]; ok {
+			cpy := *s
+			result[id] = &cpy
+		}
+	}
+	return result, nil
+}
+
 func (m *MemoryRepository) AddParticipant(ctx context.Context, p *session.SessionParticipant) error {
 	m.mu.Lock()
 	defer m.mu.Unlock()
@@ -329,6 +354,26 @@ func (m *MemoryRepository) GetOrdersBySessionID(ctx context.Context, sessionID u
 	return res, nil
 }
 
+func (m *MemoryRepository) GetOrdersBySessionIDs(ctx context.Context, sessionIDs []uuid.UUID) (map[uuid.UUID][]order.Order, error) {
+	m.mu.RLock()
+	defer m.mu.RUnlock()
+
+	idSet := make(map[uuid.UUID]bool, len(sessionIDs))
+	for _, id := range sessionIDs {
+		idSet[id] = true
+	}
+	result := make(map[uuid.UUID][]order.Order)
+	for _, o := range m.orders {
+		if idSet[o.SessionID] {
+			cpy := *o
+			cpy.Items = m.orderItems[o.ID]
+			m.enrichOrderDetails(&cpy)
+			result[o.SessionID] = append(result[o.SessionID], cpy)
+		}
+	}
+	return result, nil
+}
+
 func (m *MemoryRepository) UpdateOrder(ctx context.Context, o *order.Order) error {
 	m.mu.Lock()
 	defer m.mu.Unlock()
@@ -416,6 +461,54 @@ func (m *MemoryRepository) ListOrders(ctx context.Context, restaurantID uuid.UUI
 	return res, nil
 }
 
+func (m *MemoryRepository) ListRecentOrdersAllRestaurants(ctx context.Context, limit int, startDate, endDate *time.Time) ([]order.Order, error) {
+	m.mu.RLock()
+	defer m.mu.RUnlock()
+	var res []order.Order
+	for _, o := range m.orders {
+		if startDate != nil && o.PlacedAt.Before(*startDate) {
+			continue
+		}
+		if endDate != nil && o.PlacedAt.After(*endDate) {
+			continue
+		}
+		cpy := *o
+		cpy.Items = m.orderItems[o.ID]
+		m.enrichOrderDetails(&cpy)
+		res = append(res, cpy)
+	}
+	sort.Slice(res, func(i, j int) bool {
+		return res[i].PlacedAt.After(res[j].PlacedAt)
+	})
+	if limit > 0 && len(res) > limit {
+		res = res[:limit]
+	}
+	return res, nil
+}
+
+func (m *MemoryRepository) CountActiveSessionsAll(ctx context.Context) (int, error) {
+	m.mu.RLock()
+	defer m.mu.RUnlock()
+	count := 0
+	for _, s := range m.sessions {
+		if !s.Status.IsTerminal() {
+			count++
+		}
+	}
+	return count, nil
+}
+
+func (m *MemoryRepository) SumPlatformFeesAll(ctx context.Context) (int64, int64, error) {
+	m.mu.RLock()
+	defer m.mu.RUnlock()
+	var gmv, fee int64
+	for _, f := range m.platformFees {
+		gmv += f.GMVAmount.AmountMinorUnits
+		fee += f.FeeAmount.AmountMinorUnits
+	}
+	return gmv, fee, nil
+}
+
 func (m *MemoryRepository) RecordOrderStatusHistory(ctx context.Context, h *order.StatusHistory) error {
 	m.mu.Lock()
 	defer m.mu.Unlock()
@@ -478,6 +571,20 @@ func (m *MemoryRepository) GetPaymentsBySessionID(ctx context.Context, sessionID
 		}
 	}
 	return res, nil
+}
+
+func (m *MemoryRepository) GetPaymentsBySessionIDs(ctx context.Context, sessionIDs []uuid.UUID) (map[uuid.UUID][]payment.Payment, error) {
+	m.mu.RLock()
+	defer m.mu.RUnlock()
+	result := make(map[uuid.UUID][]payment.Payment)
+	for _, sid := range sessionIDs {
+		for _, p := range m.payments {
+			if p.SessionID == sid {
+				result[sid] = append(result[sid], *p)
+			}
+		}
+	}
+	return result, nil
 }
 
 func (m *MemoryRepository) UpdatePayment(ctx context.Context, p *payment.Payment) error {
@@ -808,6 +915,16 @@ func (m *MemoryRepository) ListTables(ctx context.Context, restaurantID uuid.UUI
 	return res, nil
 }
 
+func (m *MemoryRepository) ListTablesAll(ctx context.Context) ([]restaurant.Table, error) {
+	m.mu.RLock()
+	defer m.mu.RUnlock()
+	res := make([]restaurant.Table, 0, len(m.tables))
+	for _, t := range m.tables {
+		res = append(res, *t)
+	}
+	return res, nil
+}
+
 func (m *MemoryRepository) UpdateTable(ctx context.Context, t *restaurant.Table) error {
 	m.mu.Lock()
 	defer m.mu.Unlock()
@@ -853,6 +970,19 @@ func (m *MemoryRepository) GetStaffByID(ctx context.Context, id uuid.UUID) (*res
 	}
 	cpy := *s
 	return &cpy, nil
+}
+
+func (m *MemoryRepository) GetStaffByIDs(ctx context.Context, ids []uuid.UUID) (map[uuid.UUID]*restaurant.StaffUser, error) {
+	m.mu.RLock()
+	defer m.mu.RUnlock()
+	result := make(map[uuid.UUID]*restaurant.StaffUser)
+	for _, id := range ids {
+		if s, ok := m.staff[id]; ok {
+			cpy := *s
+			result[id] = &cpy
+		}
+	}
+	return result, nil
 }
 
 func (m *MemoryRepository) GetStaffByEmail(ctx context.Context, email string) (*restaurant.StaffUser, error) {
@@ -1224,6 +1354,22 @@ func (m *MemoryRepository) GetMenuItemByID(ctx context.Context, id uuid.UUID) (*
 	return &cpy, nil
 }
 
+func (m *MemoryRepository) GetMenuItemsByIDs(ctx context.Context, ids []uuid.UUID) (map[uuid.UUID]*restaurant.MenuItem, error) {
+	m.mu.RLock()
+	defer m.mu.RUnlock()
+	result := make(map[uuid.UUID]*restaurant.MenuItem)
+	for _, id := range ids {
+		if mi, ok := m.menuItems[id]; ok {
+			cpy := *mi
+			if vars, ok := m.menuItemVariants[id]; ok {
+				cpy.Variants = append([]restaurant.MenuItemVariant(nil), vars...)
+			}
+			result[id] = &cpy
+		}
+	}
+	return result, nil
+}
+
 func (m *MemoryRepository) ListMenuItems(ctx context.Context, restaurantID uuid.UUID) ([]restaurant.MenuItem, error) {
 	m.mu.RLock()
 	defer m.mu.RUnlock()
@@ -1272,6 +1418,19 @@ func (m *MemoryRepository) GetMenuItemVariantByID(ctx context.Context, id uuid.U
 	}
 	cpy := *v
 	return &cpy, nil
+}
+
+func (m *MemoryRepository) GetMenuItemVariantsByIDs(ctx context.Context, ids []uuid.UUID) (map[uuid.UUID]*restaurant.MenuItemVariant, error) {
+	m.mu.RLock()
+	defer m.mu.RUnlock()
+	result := make(map[uuid.UUID]*restaurant.MenuItemVariant)
+	for _, id := range ids {
+		if v, ok := m.variantsByID[id]; ok {
+			cpy := *v
+			result[id] = &cpy
+		}
+	}
+	return result, nil
 }
 
 func (m *MemoryRepository) UpdateMenuItemAvailability(ctx context.Context, id uuid.UUID, isAvailable bool) error {
@@ -1754,6 +1913,15 @@ func (m *MemoryRepository) CreateInventoryLog(ctx context.Context, log *inventor
 	copied.ItemName = item.Name
 	copied.Unit = item.Unit
 	m.inventoryLogs[log.ID] = &copied
+	return nil
+}
+
+func (m *MemoryRepository) CreateInventoryLogs(ctx context.Context, logs []*inventory.InventoryLog) error {
+	for _, log := range logs {
+		if err := m.CreateInventoryLog(ctx, log); err != nil {
+			return err
+		}
+	}
 	return nil
 }
 

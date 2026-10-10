@@ -55,6 +55,16 @@ func (tr *TrackedRepository) ListActiveSessions(ctx context.Context, restaurantI
 	return tr.underlying.ListActiveSessions(ctx, restaurantID)
 }
 
+func (tr *TrackedRepository) ListActiveSessionsAll(ctx context.Context) ([]session.DiningSession, error) {
+	RecordQuery(ctx)
+	return tr.underlying.ListActiveSessionsAll(ctx)
+}
+
+func (tr *TrackedRepository) GetSessionsByIDs(ctx context.Context, ids []uuid.UUID) (map[uuid.UUID]*session.DiningSession, error) {
+	RecordQuery(ctx)
+	return tr.underlying.GetSessionsByIDs(ctx, ids)
+}
+
 func (tr *TrackedRepository) AddParticipant(ctx context.Context, p *session.SessionParticipant) error {
 	RecordQuery(ctx)
 	return tr.underlying.AddParticipant(ctx, p)
@@ -80,6 +90,11 @@ func (tr *TrackedRepository) GetOrdersBySessionID(ctx context.Context, sessionID
 	return tr.underlying.GetOrdersBySessionID(ctx, sessionID)
 }
 
+func (tr *TrackedRepository) GetOrdersBySessionIDs(ctx context.Context, sessionIDs []uuid.UUID) (map[uuid.UUID][]order.Order, error) {
+	RecordQuery(ctx)
+	return tr.underlying.GetOrdersBySessionIDs(ctx, sessionIDs)
+}
+
 func (tr *TrackedRepository) UpdateOrder(ctx context.Context, o *order.Order) error {
 	RecordQuery(ctx)
 	return tr.underlying.UpdateOrder(ctx, o)
@@ -98,6 +113,21 @@ func (tr *TrackedRepository) ListPendingOrders(ctx context.Context, restaurantID
 func (tr *TrackedRepository) ListOrders(ctx context.Context, restaurantID uuid.UUID, limit int, startDate, endDate *time.Time) ([]order.Order, error) {
 	RecordQuery(ctx)
 	return tr.underlying.ListOrders(ctx, restaurantID, limit, startDate, endDate)
+}
+
+func (tr *TrackedRepository) ListRecentOrdersAllRestaurants(ctx context.Context, limit int, startDate, endDate *time.Time) ([]order.Order, error) {
+	RecordQuery(ctx)
+	return tr.underlying.ListRecentOrdersAllRestaurants(ctx, limit, startDate, endDate)
+}
+
+func (tr *TrackedRepository) CountActiveSessionsAll(ctx context.Context) (int, error) {
+	RecordQuery(ctx)
+	return tr.underlying.CountActiveSessionsAll(ctx)
+}
+
+func (tr *TrackedRepository) SumPlatformFeesAll(ctx context.Context) (int64, int64, error) {
+	RecordQuery(ctx)
+	return tr.underlying.SumPlatformFeesAll(ctx)
 }
 
 func (tr *TrackedRepository) RecordOrderStatusHistory(ctx context.Context, h *order.StatusHistory) error {
@@ -123,6 +153,11 @@ func (tr *TrackedRepository) GetPaymentByID(ctx context.Context, id uuid.UUID) (
 func (tr *TrackedRepository) GetPaymentsBySessionID(ctx context.Context, sessionID uuid.UUID) ([]payment.Payment, error) {
 	RecordQuery(ctx)
 	return tr.underlying.GetPaymentsBySessionID(ctx, sessionID)
+}
+
+func (tr *TrackedRepository) GetPaymentsBySessionIDs(ctx context.Context, sessionIDs []uuid.UUID) (map[uuid.UUID][]payment.Payment, error) {
+	RecordQuery(ctx)
+	return tr.underlying.GetPaymentsBySessionIDs(ctx, sessionIDs)
 }
 
 func (tr *TrackedRepository) UpdatePayment(ctx context.Context, p *payment.Payment) error {
@@ -245,6 +280,11 @@ func (tr *TrackedRepository) ListTables(ctx context.Context, restaurantID uuid.U
 	return tr.underlying.ListTables(ctx, restaurantID)
 }
 
+func (tr *TrackedRepository) ListTablesAll(ctx context.Context) ([]restaurant.Table, error) {
+	RecordQuery(ctx)
+	return tr.underlying.ListTablesAll(ctx)
+}
+
 func (tr *TrackedRepository) UpdateTable(ctx context.Context, t *restaurant.Table) error {
 	RecordQuery(ctx)
 	return tr.underlying.UpdateTable(ctx, t)
@@ -258,6 +298,11 @@ func (tr *TrackedRepository) CreateStaff(ctx context.Context, s *restaurant.Staf
 func (tr *TrackedRepository) GetStaffByID(ctx context.Context, id uuid.UUID) (*restaurant.StaffUser, error) {
 	RecordQuery(ctx)
 	return tr.underlying.GetStaffByID(ctx, id)
+}
+
+func (tr *TrackedRepository) GetStaffByIDs(ctx context.Context, ids []uuid.UUID) (map[uuid.UUID]*restaurant.StaffUser, error) {
+	RecordQuery(ctx)
+	return tr.underlying.GetStaffByIDs(ctx, ids)
 }
 
 func (tr *TrackedRepository) GetStaffByEmail(ctx context.Context, email string) (*restaurant.StaffUser, error) {
@@ -320,6 +365,11 @@ func (tr *TrackedRepository) GetMenuItemByID(ctx context.Context, id uuid.UUID) 
 	return tr.underlying.GetMenuItemByID(ctx, id)
 }
 
+func (tr *TrackedRepository) GetMenuItemsByIDs(ctx context.Context, ids []uuid.UUID) (map[uuid.UUID]*restaurant.MenuItem, error) {
+	RecordQuery(ctx)
+	return tr.underlying.GetMenuItemsByIDs(ctx, ids)
+}
+
 func (tr *TrackedRepository) ListMenuItems(ctx context.Context, restaurantID uuid.UUID) ([]restaurant.MenuItem, error) {
 	RecordQuery(ctx)
 	return tr.underlying.ListMenuItems(ctx, restaurantID)
@@ -343,6 +393,11 @@ func (tr *TrackedRepository) ReplaceMenuItemVariants(ctx context.Context, menuIt
 func (tr *TrackedRepository) GetMenuItemVariantByID(ctx context.Context, id uuid.UUID) (*restaurant.MenuItemVariant, error) {
 	RecordQuery(ctx)
 	return tr.underlying.GetMenuItemVariantByID(ctx, id)
+}
+
+func (tr *TrackedRepository) GetMenuItemVariantsByIDs(ctx context.Context, ids []uuid.UUID) (map[uuid.UUID]*restaurant.MenuItemVariant, error) {
+	RecordQuery(ctx)
+	return tr.underlying.GetMenuItemVariantsByIDs(ctx, ids)
 }
 
 func (tr *TrackedRepository) GetSettings(ctx context.Context, restaurantID uuid.UUID) (*restaurant.RestaurantSettings, error) {
@@ -473,6 +528,11 @@ func (tr *TrackedRepository) DeleteInventoryItem(ctx context.Context, restaurant
 func (tr *TrackedRepository) CreateInventoryLog(ctx context.Context, log *inventory.InventoryLog) error {
 	RecordQuery(ctx)
 	return tr.underlying.CreateInventoryLog(ctx, log)
+}
+
+func (tr *TrackedRepository) CreateInventoryLogs(ctx context.Context, logs []*inventory.InventoryLog) error {
+	RecordQuery(ctx)
+	return tr.underlying.CreateInventoryLogs(ctx, logs)
 }
 
 func (tr *TrackedRepository) ListInventoryLogs(ctx context.Context, restaurantID uuid.UUID, itemID *uuid.UUID, limit int) ([]inventory.InventoryLog, error) {

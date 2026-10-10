@@ -15,10 +15,12 @@ import (
 	"github.com/devrishijain/table-manager/pkg/crypto"
 	"golang.org/x/crypto/bcrypt"
 
+	"github.com/devrishijain/table-manager/internal/adapter/forecast"
 	objstore "github.com/devrishijain/table-manager/internal/adapter/storage"
 	"github.com/devrishijain/table-manager/internal/api/middleware"
 	"github.com/devrishijain/table-manager/internal/domain/audit"
 	"github.com/devrishijain/table-manager/internal/domain/exitpass"
+	"github.com/devrishijain/table-manager/internal/domain/ledger"
 	"github.com/devrishijain/table-manager/internal/domain/money"
 	"github.com/devrishijain/table-manager/internal/domain/order"
 	"github.com/devrishijain/table-manager/internal/domain/payment"
@@ -274,8 +276,15 @@ func (h *APIHandler) GetSessionDetails(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	orders, _ := h.orderService.GetOrdersBySessionID(r.Context(), sessionID)
-	payments, _ := h.paymentService.GetPaymentsBySession(r.Context(), sessionID)
+	var (
+		orders   []order.Order
+		payments []payment.Payment
+	)
+	var wg sync.WaitGroup
+	wg.Add(2)
+	go func() { defer wg.Done(); orders, _ = h.orderService.GetOrdersBySessionID(r.Context(), sessionID) }()
+	go func() { defer wg.Done(); payments, _ = h.paymentService.GetPaymentsBySession(r.Context(), sessionID) }()
+	wg.Wait()
 
 	resp := map[string]interface{}{
 		"session":  sess,
@@ -793,8 +802,15 @@ func (h *APIHandler) GetTableDashboard(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	tables, _ := h.repo.ListTables(r.Context(), restaurantID)
-	activeSessions, _ := h.repo.ListActiveSessions(r.Context(), restaurantID)
+	var (
+		tables         []restaurant.Table
+		activeSessions []session.DiningSession
+	)
+	var wg sync.WaitGroup
+	wg.Add(2)
+	go func() { defer wg.Done(); tables, _ = h.repo.ListTables(r.Context(), restaurantID) }()
+	go func() { defer wg.Done(); activeSessions, _ = h.repo.ListActiveSessions(r.Context(), restaurantID) }()
+	wg.Wait()
 
 	var viewerClaims *crypto.StaffClaims
 	if claims, ok := middleware.GetStaffClaimsFromContext(r.Context()); ok {
@@ -947,14 +963,23 @@ func (h *APIHandler) GetKitchenQueue(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	queue, err := h.orderService.ListKitchenQueue(r.Context(), restaurantID)
-	if err != nil {
-		errorResponse(w, http.StatusInternalServerError, err.Error())
+	var (
+		queue    []order.Order
+		sessions []session.DiningSession
+		queueErr error
+	)
+	var wg sync.WaitGroup
+	wg.Add(2)
+	go func() { defer wg.Done(); queue, queueErr = h.orderService.ListKitchenQueue(r.Context(), restaurantID) }()
+	go func() { defer wg.Done(); sessions, _ = h.repo.ListActiveSessions(r.Context(), restaurantID) }()
+	wg.Wait()
+
+	if queueErr != nil {
+		errorResponse(w, http.StatusInternalServerError, queueErr.Error())
 		return
 	}
 
 	// Resolve session waiter assignments once for filtering & enrichment
-	sessions, _ := h.repo.ListActiveSessions(r.Context(), restaurantID)
 	sessionByID := make(map[uuid.UUID]session.DiningSession, len(sessions))
 	for _, s := range sessions {
 		sessionByID[s.ID] = s
@@ -1163,13 +1188,28 @@ func (h *APIHandler) GetSalesForecast(w http.ResponseWriter, r *http.Request) {
 		horizon = h
 	}
 
-	forecasts, err := h.analyticsService.GetSalesForecast(r.Context(), claims.RestaurantID, horizon)
-	if err != nil {
-		errorResponse(w, http.StatusInternalServerError, err.Error())
+	var (
+		forecasts   []forecast.Projection
+		mtd         *service.TodayAnalytics
+		forecastErr error
+	)
+	var wg sync.WaitGroup
+	wg.Add(2)
+	go func() {
+		defer wg.Done()
+		forecasts, forecastErr = h.analyticsService.GetSalesForecast(r.Context(), claims.RestaurantID, horizon)
+	}()
+	go func() {
+		defer wg.Done()
+		mtd, _ = h.analyticsService.GetMonthToDateAnalytics(r.Context(), claims.RestaurantID)
+	}()
+	wg.Wait()
+
+	if forecastErr != nil {
+		errorResponse(w, http.StatusInternalServerError, forecastErr.Error())
 		return
 	}
 
-	mtd, _ := h.analyticsService.GetMonthToDateAnalytics(r.Context(), claims.RestaurantID)
 	actualSales := money.Zero()
 	if mtd != nil {
 		actualSales = mtd.TotalGMV
@@ -1197,13 +1237,27 @@ func (h *APIHandler) GetLedgerPayable(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	payable, err := h.ledgerService.GetRunningPayable(r.Context(), claims.RestaurantID)
-	if err != nil {
-		errorResponse(w, http.StatusInternalServerError, err.Error())
+	var (
+		payable     money.Money
+		settlements []ledger.RestaurantSettlement
+		payableErr  error
+	)
+	var wg sync.WaitGroup
+	wg.Add(2)
+	go func() {
+		defer wg.Done()
+		payable, payableErr = h.ledgerService.GetRunningPayable(r.Context(), claims.RestaurantID)
+	}()
+	go func() {
+		defer wg.Done()
+		settlements, _ = h.ledgerService.ListSettlements(r.Context(), claims.RestaurantID)
+	}()
+	wg.Wait()
+
+	if payableErr != nil {
+		errorResponse(w, http.StatusInternalServerError, payableErr.Error())
 		return
 	}
-
-	settlements, _ := h.ledgerService.ListSettlements(r.Context(), claims.RestaurantID)
 
 	jsonResponse(w, http.StatusOK, map[string]interface{}{
 		"running_platform_payable": payable,
@@ -1223,7 +1277,8 @@ func (h *APIHandler) ListAllRestaurants(w http.ResponseWriter, r *http.Request) 
 	typeFilter := strings.ToUpper(strings.TrimSpace(r.URL.Query().Get("type")))
 	query := strings.ToLower(strings.TrimSpace(r.URL.Query().Get("q")))
 
-	enriched := make([]map[string]interface{}, 0, len(list))
+	// Filter first, then batch-enrich (4 queries total instead of 4 per restaurant)
+	filtered := make([]restaurant.Restaurant, 0, len(list))
 	for _, rest := range list {
 		if rest.ID == restaurant.PlatformRestaurantID {
 			continue
@@ -1241,10 +1296,10 @@ func (h *APIHandler) ListAllRestaurants(w http.ResponseWriter, r *http.Request) 
 				continue
 			}
 		}
-		enriched = append(enriched, h.outletInfo(r.Context(), rest))
+		filtered = append(filtered, rest)
 	}
 
-	jsonResponse(w, http.StatusOK, enriched)
+	jsonResponse(w, http.StatusOK, h.enrichOutletsBatch(r.Context(), filtered))
 }
 
 type CommissionOverrideRequest struct {
@@ -1968,6 +2023,7 @@ func (h *APIHandler) RenewSubscription(w http.ResponseWriter, r *http.Request) {
 		errorResponse(w, http.StatusInternalServerError, "failed to renew subscription")
 		return
 	}
+	middleware.InvalidateSubscriptionCache(claims.RestaurantID)
 
 	plan := otp.Plan
 	if plan == "" {
@@ -2034,6 +2090,91 @@ func (h *APIHandler) revenueSinceMinor(ctx context.Context, restaurantID uuid.UU
 		total += o.Total.AmountMinorUnits
 	}
 	return total
+}
+
+// enrichOutletsBatch builds enriched outlet info for multiple restaurants in ~4 total queries
+// instead of 4 queries per restaurant (N+1 → batch). Queries run in parallel.
+func (h *APIHandler) enrichOutletsBatch(ctx context.Context, rests []restaurant.Restaurant) []map[string]interface{} {
+	if len(rests) == 0 {
+		return []map[string]interface{}{}
+	}
+
+	now := time.Now().UTC()
+	dayStart := time.Date(now.Year(), now.Month(), now.Day(), 0, 0, 0, 0, time.UTC)
+	thirtyDaysAgo := dayStart.AddDate(0, 0, -30)
+
+	var (
+		allTables         []restaurant.Table
+		allActiveSessions []session.DiningSession
+		ordersToday       []order.Order
+		orders30d         []order.Order
+	)
+	var wg sync.WaitGroup
+	wg.Add(4)
+	go func() { defer wg.Done(); allTables, _ = h.repo.ListTablesAll(ctx) }()
+	go func() { defer wg.Done(); allActiveSessions, _ = h.repo.ListActiveSessionsAll(ctx) }()
+	go func() {
+		defer wg.Done()
+		ordersToday, _ = h.repo.ListRecentOrdersAllRestaurants(ctx, 1000, &dayStart, nil)
+	}()
+	go func() {
+		defer wg.Done()
+		orders30d, _ = h.repo.ListRecentOrdersAllRestaurants(ctx, 5000, &thirtyDaysAgo, nil)
+	}()
+	wg.Wait()
+
+	tableCountByRest := make(map[uuid.UUID]int)
+	for _, t := range allTables {
+		tableCountByRest[t.RestaurantID]++
+	}
+	activeSessionCountByRest := make(map[uuid.UUID]int)
+	for _, s := range allActiveSessions {
+		activeSessionCountByRest[s.RestaurantID]++
+	}
+	ordersTodayByRest := make(map[uuid.UUID]int)
+	revenueTodayByRest := make(map[uuid.UUID]int64)
+	for _, o := range ordersToday {
+		if o.Status == order.StateCancelled || o.Status == order.StateRejected {
+			continue
+		}
+		ordersTodayByRest[o.RestaurantID]++
+		revenueTodayByRest[o.RestaurantID] += o.Total.AmountMinorUnits
+	}
+	revenue30dByRest := make(map[uuid.UUID]int64)
+	for _, o := range orders30d {
+		if o.Status == order.StateCancelled || o.Status == order.StateRejected {
+			continue
+		}
+		revenue30dByRest[o.RestaurantID] += o.Total.AmountMinorUnits
+	}
+
+	out := make([]map[string]interface{}, 0, len(rests))
+	for _, rest := range rests {
+		out = append(out, map[string]interface{}{
+			"id":                     rest.ID,
+			"name":                   rest.Name,
+			"slug":                   rest.Slug,
+			"theme":                  rest.Theme,
+			"venue_type":             rest.VenueType,
+			"status":                 rest.Status,
+			"subscription_plan":      rest.SubscriptionPlan,
+			"subscription_status":    rest.SubscriptionStatus,
+			"subscription_end_at":    rest.SubscriptionEndAt,
+			"days_remaining":         rest.DaysRemaining(),
+			"is_active":              rest.IsSubscriptionActive(),
+			"is_subscription_active": rest.IsSubscriptionActive(),
+			"franchise_id":           rest.FranchiseID,
+			"franchise_name":         rest.FranchiseName,
+			"ownership_type":         rest.OwnershipType,
+			"table_count":            tableCountByRest[rest.ID],
+			"active_sessions":        activeSessionCountByRest[rest.ID],
+			"orders_today":           ordersTodayByRest[rest.ID],
+			"revenue_today_minor":    revenueTodayByRest[rest.ID],
+			"revenue_30d_minor":      revenue30dByRest[rest.ID],
+			"created_at":             rest.CreatedAt,
+		})
+	}
+	return out
 }
 
 // outletInfo builds the enriched franchise-outlet / admin restaurant view.
@@ -2132,12 +2273,7 @@ func (h *APIHandler) GetFranchiseOutlets(w http.ResponseWriter, r *http.Request)
 		return
 	}
 
-	outlets := make([]map[string]interface{}, 0, len(rests))
-	for _, rest := range rests {
-		outlets = append(outlets, h.outletInfo(r.Context(), rest))
-	}
-
-	jsonResponse(w, http.StatusOK, outlets)
+	jsonResponse(w, http.StatusOK, h.enrichOutletsBatch(r.Context(), rests))
 }
 
 func (h *APIHandler) GetFranchiseSummary(w http.ResponseWriter, r *http.Request) {
@@ -2562,19 +2698,32 @@ func (h *APIHandler) GetPendingOrders(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	orders, err := h.orderService.ListPendingOrders(r.Context(), claims.RestaurantID)
-	if err != nil {
-		errorResponse(w, http.StatusInternalServerError, err.Error())
+	var (
+		orders   []order.Order
+		sessions []session.DiningSession
+		tables   []restaurant.Table
+		ordErr   error
+	)
+	var wg sync.WaitGroup
+	wg.Add(3)
+	go func() {
+		defer wg.Done()
+		orders, ordErr = h.orderService.ListPendingOrders(r.Context(), claims.RestaurantID)
+	}()
+	go func() { defer wg.Done(); sessions, _ = h.repo.ListActiveSessions(r.Context(), claims.RestaurantID) }()
+	go func() { defer wg.Done(); tables, _ = h.repo.ListTables(r.Context(), claims.RestaurantID) }()
+	wg.Wait()
+
+	if ordErr != nil {
+		errorResponse(w, http.StatusInternalServerError, ordErr.Error())
 		return
 	}
 
 	// Fetch active sessions & tables once for waiter-assignment filtering and capacity
-	sessions, _ := h.repo.ListActiveSessions(r.Context(), claims.RestaurantID)
 	sessionByID := make(map[uuid.UUID]session.DiningSession, len(sessions))
 	for _, s := range sessions {
 		sessionByID[s.ID] = s
 	}
-	tables, _ := h.repo.ListTables(r.Context(), claims.RestaurantID)
 	tableByID := make(map[uuid.UUID]restaurant.Table, len(tables))
 	for _, t := range tables {
 		tableByID[t.ID] = t
@@ -2898,10 +3047,20 @@ func (h *APIHandler) GetRestaurantDetails(w http.ResponseWriter, r *http.Request
 		return
 	}
 
-	settings, _ := h.repo.GetSettings(r.Context(), restaurantID)
-	onboarding, _ := h.repo.GetOnboarding(r.Context(), restaurantID)
-	tables, _ := h.repo.ListTables(r.Context(), restaurantID)
-	activeSessions, _ := h.repo.ListActiveSessions(r.Context(), restaurantID)
+	// Parallelize independent queries
+	var (
+		settings       *restaurant.RestaurantSettings
+		onboarding     *restaurant.RestaurantOnboarding
+		tables         []restaurant.Table
+		activeSessions []session.DiningSession
+	)
+	var wg sync.WaitGroup
+	wg.Add(4)
+	go func() { defer wg.Done(); settings, _ = h.repo.GetSettings(r.Context(), restaurantID) }()
+	go func() { defer wg.Done(); onboarding, _ = h.repo.GetOnboarding(r.Context(), restaurantID) }()
+	go func() { defer wg.Done(); tables, _ = h.repo.ListTables(r.Context(), restaurantID) }()
+	go func() { defer wg.Done(); activeSessions, _ = h.repo.ListActiveSessions(r.Context(), restaurantID) }()
+	wg.Wait()
 
 	jsonResponse(w, http.StatusOK, map[string]interface{}{
 		"restaurant":      rest,
@@ -2918,31 +3077,23 @@ func (h *APIHandler) GetPlatformAnalytics(w http.ResponseWriter, r *http.Request
 		errorResponse(w, http.StatusInternalServerError, err.Error())
 		return
 	}
-	filtered := restaurants[:0]
-	for _, rest := range restaurants {
-		if rest.ID != restaurant.PlatformRestaurantID {
-			filtered = append(filtered, rest)
-		}
-	}
-	restaurants = filtered
-
-	var totalPlatformGMVMinor int64
-	var totalPlatformFeeMinor int64
 	activeRestaurantCount := 0
-
+	totalCount := 0
 	for _, rest := range restaurants {
+		if rest.ID == restaurant.PlatformRestaurantID {
+			continue
+		}
+		totalCount++
 		if rest.Status == restaurant.StatusActive {
 			activeRestaurantCount++
 		}
-		fees, _ := h.repo.ListPlatformFees(r.Context(), rest.ID, "")
-		for _, f := range fees {
-			totalPlatformGMVMinor += f.GMVAmount.AmountMinorUnits
-			totalPlatformFeeMinor += f.FeeAmount.AmountMinorUnits
-		}
 	}
 
+	// Single aggregate query instead of N per-restaurant queries
+	totalPlatformGMVMinor, totalPlatformFeeMinor, _ := h.repo.SumPlatformFeesAll(r.Context())
+
 	jsonResponse(w, http.StatusOK, map[string]interface{}{
-		"total_restaurants":    len(restaurants),
+		"total_restaurants":    totalCount,
 		"active_restaurants":   activeRestaurantCount,
 		"platform_gross_sales": money.New(totalPlatformGMVMinor),
 		"platform_fee_revenue": money.New(totalPlatformFeeMinor),
@@ -3056,6 +3207,7 @@ func (h *APIHandler) SuspendRestaurant(w http.ResponseWriter, r *http.Request) {
 		errorResponse(w, http.StatusInternalServerError, err.Error())
 		return
 	}
+	middleware.InvalidateSubscriptionCache(restaurantID)
 	jsonResponse(w, http.StatusOK, rest)
 }
 
@@ -3078,6 +3230,7 @@ func (h *APIHandler) ReactivateRestaurant(w http.ResponseWriter, r *http.Request
 		errorResponse(w, http.StatusInternalServerError, err.Error())
 		return
 	}
+	middleware.InvalidateSubscriptionCache(restaurantID)
 	jsonResponse(w, http.StatusOK, rest)
 }
 
@@ -3105,6 +3258,7 @@ func (h *APIHandler) AdminExtendSubscription(w http.ResponseWriter, r *http.Requ
 		errorResponse(w, http.StatusInternalServerError, err.Error())
 		return
 	}
+	middleware.InvalidateSubscriptionCache(restaurantID)
 
 	if req.Plan != "" {
 		rest.SubscriptionPlan = strings.ToUpper(req.Plan)

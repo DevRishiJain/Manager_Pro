@@ -3,34 +3,37 @@ package service
 import (
 	"context"
 	"sort"
+	"sync"
 	"time"
 
 	"github.com/devrishijain/table-manager/internal/adapter/forecast"
 	"github.com/devrishijain/table-manager/internal/domain/expense"
 	"github.com/devrishijain/table-manager/internal/domain/inventory"
+	"github.com/devrishijain/table-manager/internal/domain/ledger"
 	"github.com/devrishijain/table-manager/internal/domain/money"
 	"github.com/devrishijain/table-manager/internal/domain/order"
 	"github.com/devrishijain/table-manager/internal/domain/payment"
+	"github.com/devrishijain/table-manager/internal/domain/restaurant"
 	"github.com/devrishijain/table-manager/internal/domain/session"
 	"github.com/devrishijain/table-manager/internal/storage"
 	"github.com/google/uuid"
 )
 
 type TodayAnalytics struct {
-	Date                   string                  `json:"date"`
-	Timezone               string                  `json:"timezone"`
-	TotalGMV               money.Money             `json:"total_gmv"`
-	OrderCount             int                     `json:"order_count"`
-	AverageOrderValue      money.Money             `json:"average_order_value"`
-	PlatformFeeAccrued     money.Money             `json:"platform_fee_accrued"`
+	Date                   string                   `json:"date"`
+	Timezone               string                   `json:"timezone"`
+	TotalGMV               money.Money              `json:"total_gmv"`
+	OrderCount             int                      `json:"order_count"`
+	AverageOrderValue      money.Money              `json:"average_order_value"`
+	PlatformFeeAccrued     money.Money              `json:"platform_fee_accrued"`
 	PaymentMethodBreakdown map[payment.Method]int64 `json:"payment_method_breakdown"`
-	ActiveSessionCount     int                     `json:"active_session_count"`
-	CompletedSessionCount  int                     `json:"completed_session_count"`
+	ActiveSessionCount     int                      `json:"active_session_count"`
+	CompletedSessionCount  int                      `json:"completed_session_count"`
 }
 
 type PeakHourBucket struct {
-	HourOfDay int `json:"hour_of_day"`
-	DayOfWeek int `json:"day_of_week"`
+	HourOfDay    int `json:"hour_of_day"`
+	DayOfWeek    int `json:"day_of_week"`
 	SessionCount int `json:"session_count"`
 }
 
@@ -63,8 +66,18 @@ func (s *AnalyticsService) GetTodayAnalytics(ctx context.Context, restaurantID u
 	startOfDay := time.Date(nowInLoc.Year(), nowInLoc.Month(), nowInLoc.Day(), 0, 0, 0, 0, loc).UTC()
 	endOfDay := time.Date(nowInLoc.Year(), nowInLoc.Month(), nowInLoc.Day(), 23, 59, 59, 999999999, loc).UTC()
 
-	// Query active and historical sessions for tenant
-	activeSessions, _ := s.repo.ListActiveSessions(ctx, restaurantID)
+	var (
+		activeSessions []session.DiningSession
+		todayOrders    []order.Order
+	)
+	var wg sync.WaitGroup
+	wg.Add(2)
+	go func() { defer wg.Done(); activeSessions, _ = s.repo.ListActiveSessions(ctx, restaurantID) }()
+	go func() {
+		defer wg.Done()
+		todayOrders, _ = s.repo.ListOrders(ctx, restaurantID, 500, &startOfDay, &endOfDay)
+	}()
+	wg.Wait()
 
 	var totalGMVMinor int64
 	var totalOrders int
@@ -73,8 +86,6 @@ func (s *AnalyticsService) GetTodayAnalytics(ctx context.Context, restaurantID u
 	methodBreakdown := make(map[payment.Method]int64)
 	sessionSeen := make(map[uuid.UUID]bool)
 
-	// Fetch orders placed today
-	todayOrders, _ := s.repo.ListOrders(ctx, restaurantID, 500, &startOfDay, &endOfDay)
 	for _, o := range todayOrders {
 		if o.Status != order.StateCancelled {
 			totalGMVMinor += o.Total.AmountMinorUnits
@@ -86,38 +97,72 @@ func (s *AnalyticsService) GetTodayAnalytics(ctx context.Context, restaurantID u
 	}
 
 	// For sessions with orders today, fetch their confirmed payments and completion status
-	for sessID := range sessionSeen {
-		payments, _ := s.repo.GetPaymentsBySessionID(ctx, sessID)
-		for _, p := range payments {
-			if p.Status == payment.StateConfirmed {
-				methodBreakdown[p.Method] += p.Amount.AmountMinorUnits
+	if len(sessionSeen) > 0 {
+		sessionIDs := make([]uuid.UUID, 0, len(sessionSeen))
+		for sessID := range sessionSeen {
+			sessionIDs = append(sessionIDs, sessID)
+		}
+		var (
+			paymentsBySession map[uuid.UUID][]payment.Payment
+			sessionsByID      map[uuid.UUID]*session.DiningSession
+		)
+		var wg2 sync.WaitGroup
+		wg2.Add(2)
+		go func() { defer wg2.Done(); paymentsBySession, _ = s.repo.GetPaymentsBySessionIDs(ctx, sessionIDs) }()
+		go func() { defer wg2.Done(); sessionsByID, _ = s.repo.GetSessionsByIDs(ctx, sessionIDs) }()
+		wg2.Wait()
+
+		for _, payments := range paymentsBySession {
+			for _, p := range payments {
+				if p.Status == payment.StateConfirmed {
+					methodBreakdown[p.Method] += p.Amount.AmountMinorUnits
+				}
 			}
 		}
-		sess, err := s.repo.GetSessionByID(ctx, sessID)
-		if err == nil && sess != nil {
+		for _, sess := range sessionsByID {
 			if sess.Status == session.StateCompleted || sess.ClosedAt != nil {
 				completedSessions++
 			}
 		}
 	}
 
-	// Also count orders from currently active sessions opened today if not yet in todayOrders
+	// Also count orders from currently active sessions opened today if not yet in todayOrders.
+	// Batch-fetch orders for all such sessions in one query + platform fees in parallel.
+	pendingSessionIDs := make([]uuid.UUID, 0, len(activeSessions))
 	for _, sess := range activeSessions {
-		if sess.OpenedAt.In(loc).Format("2006-01-02") == todayStr {
-			if !sessionSeen[sess.ID] {
-				orders, _ := s.repo.GetOrdersBySessionID(ctx, sess.ID)
-				for _, o := range orders {
-					if !o.Status.IsTerminal() || o.Status == "SERVED" {
-						totalOrders++
-						totalGMVMinor += o.Total.AmountMinorUnits
-					}
-				}
+		if sess.OpenedAt.In(loc).Format("2006-01-02") == todayStr && !sessionSeen[sess.ID] {
+			pendingSessionIDs = append(pendingSessionIDs, sess.ID)
+		}
+	}
+
+	var (
+		ordersBySession map[uuid.UUID][]order.Order
+		fees            []ledger.PlatformFeeLedgerEntry
+	)
+	var wg2 sync.WaitGroup
+	wg2.Add(2)
+	go func() {
+		defer wg2.Done()
+		if len(pendingSessionIDs) > 0 {
+			ordersBySession, _ = s.repo.GetOrdersBySessionIDs(ctx, pendingSessionIDs)
+		}
+	}()
+	go func() {
+		defer wg2.Done()
+		fees, _ = s.repo.ListPlatformFees(ctx, restaurantID, nowInLoc.Format("2006-01"))
+	}()
+	wg2.Wait()
+
+	for _, orders := range ordersBySession {
+		for _, o := range orders {
+			if !o.Status.IsTerminal() || o.Status == "SERVED" {
+				totalOrders++
+				totalGMVMinor += o.Total.AmountMinorUnits
 			}
 		}
 	}
 
 	// Platform fee calculation: check fees ledger, else calculate using commission rate
-	fees, _ := s.repo.ListPlatformFees(ctx, restaurantID, nowInLoc.Format("2006-01"))
 	for _, f := range fees {
 		fTime := f.CreatedAt.In(loc)
 		if fTime.Format("2006-01-02") == todayStr {
@@ -183,15 +228,25 @@ func (s *AnalyticsService) GetMonthToDateAnalytics(ctx context.Context, restaura
 	var orderCount int
 	var platformFeeMinor int64
 
-	monthOrders, _ := s.repo.ListOrders(ctx, restaurantID, 500, &startOfMonth, &endOfDay)
+	var (
+		monthOrders []order.Order
+		fees        []ledger.PlatformFeeLedgerEntry
+	)
+	var wg sync.WaitGroup
+	wg.Add(2)
+	go func() {
+		defer wg.Done()
+		monthOrders, _ = s.repo.ListOrders(ctx, restaurantID, 500, &startOfMonth, &endOfDay)
+	}()
+	go func() { defer wg.Done(); fees, _ = s.repo.ListPlatformFees(ctx, restaurantID, monthPeriod) }()
+	wg.Wait()
+
 	for _, o := range monthOrders {
 		if o.Status != order.StateCancelled {
 			totalGMVMinor += o.Total.AmountMinorUnits
 			orderCount++
 		}
 	}
-
-	fees, _ := s.repo.ListPlatformFees(ctx, restaurantID, monthPeriod)
 	for _, f := range fees {
 		platformFeeMinor += f.FeeAmount.AmountMinorUnits
 	}
@@ -242,9 +297,9 @@ func (s *AnalyticsService) GetPeakHours(ctx context.Context, restaurantID uuid.U
 }
 
 type PeriodComparison struct {
-	CurrentPeriodGMV  money.Money `json:"current_period_gmv"`
-	PriorPeriodGMV    money.Money `json:"prior_period_gmv"`
-	GrowthPercentage  float64     `json:"growth_percentage"`
+	CurrentPeriodGMV money.Money `json:"current_period_gmv"`
+	PriorPeriodGMV   money.Money `json:"prior_period_gmv"`
+	GrowthPercentage float64     `json:"growth_percentage"`
 }
 
 // GetPeriodComparison compares current month to prior month (§8A).
@@ -266,8 +321,18 @@ func (s *AnalyticsService) GetPeriodComparison(ctx context.Context, restaurantID
 	startOfPriorMonth := time.Date(priorMonthDate.Year(), priorMonthDate.Month(), 1, 0, 0, 0, 0, loc).UTC()
 	endOfPriorMonth := time.Date(now.Year(), now.Month(), 1, 0, 0, 0, 0, loc).Add(-time.Nanosecond).UTC()
 
-	currentOrders, _ := s.repo.ListOrders(ctx, restaurantID, 500, &startOfCurrentMonth, &endOfCurrentMonth)
-	priorOrders, _ := s.repo.ListOrders(ctx, restaurantID, 500, &startOfPriorMonth, &endOfPriorMonth)
+	var currentOrders, priorOrders []order.Order
+	var wg sync.WaitGroup
+	wg.Add(2)
+	go func() {
+		defer wg.Done()
+		currentOrders, _ = s.repo.ListOrders(ctx, restaurantID, 500, &startOfCurrentMonth, &endOfCurrentMonth)
+	}()
+	go func() {
+		defer wg.Done()
+		priorOrders, _ = s.repo.ListOrders(ctx, restaurantID, 500, &startOfPriorMonth, &endOfPriorMonth)
+	}()
+	wg.Wait()
 
 	var curMinor, priorMinor int64
 	for _, o := range currentOrders {
@@ -294,38 +359,72 @@ func (s *AnalyticsService) GetPeriodComparison(ctx context.Context, restaurantID
 }
 
 type DashboardOverview struct {
-	TodaySales        money.Money             `json:"today_sales"`
-	MonthToDateSales  money.Money             `json:"month_to_date_sales"`
-	ForecastNext7Days money.Money             `json:"forecast_next_7_days"`
-	ActiveTablesCount int                     `json:"active_tables_count"`
-	TotalTablesCount  int                     `json:"total_tables_count"`
-	PendingPayments   int                     `json:"pending_payments_count"`
-	ActiveSessions    int                     `json:"active_sessions_count"`
+	TodaySales        money.Money              `json:"today_sales"`
+	MonthToDateSales  money.Money              `json:"month_to_date_sales"`
+	ForecastNext7Days money.Money              `json:"forecast_next_7_days"`
+	ActiveTablesCount int                      `json:"active_tables_count"`
+	TotalTablesCount  int                      `json:"total_tables_count"`
+	PendingPayments   int                      `json:"pending_payments_count"`
+	ActiveSessions    int                      `json:"active_sessions_count"`
 	PaymentBreakdown  map[payment.Method]int64 `json:"payment_breakdown"`
 }
 
 // GetDashboardOverview compiles an immediate top-level operational summary for the restaurant manager dashboard.
 func (s *AnalyticsService) GetDashboardOverview(ctx context.Context, restaurantID uuid.UUID) (*DashboardOverview, error) {
-	today, err := s.GetTodayAnalytics(ctx, restaurantID)
-	if err != nil {
-		return nil, err
-	}
-	mtd, _ := s.GetMonthToDateAnalytics(ctx, restaurantID)
+	// Parallelize independent queries to cut latency from 6 sequential → 2 parallel rounds
+	var (
+		today                         *TodayAnalytics
+		mtd                           *TodayAnalytics
+		tables                        []restaurant.Table
+		activeSessions                []session.DiningSession
+		forecasts                     []forecast.Projection
+		todayErr, mtdErr, forecastErr error
+	)
 
-	tables, _ := s.repo.ListTables(ctx, restaurantID)
-	activeSessions, _ := s.repo.ListActiveSessions(ctx, restaurantID)
+	var wg sync.WaitGroup
+	wg.Add(3)
+
+	go func() {
+		defer wg.Done()
+		today, todayErr = s.GetTodayAnalytics(ctx, restaurantID)
+	}()
+	go func() {
+		defer wg.Done()
+		mtd, mtdErr = s.GetMonthToDateAnalytics(ctx, restaurantID)
+	}()
+	go func() {
+		defer wg.Done()
+		forecasts, forecastErr = s.GetSalesForecast(ctx, restaurantID, 7)
+	}()
+
+	// These two are fast and can run alongside the goroutines
+	tables, _ = s.repo.ListTables(ctx, restaurantID)
+	activeSessions, _ = s.repo.ListActiveSessions(ctx, restaurantID)
+
+	wg.Wait()
+
+	if todayErr != nil {
+		return nil, todayErr
+	}
+	_ = mtdErr
+	_ = forecastErr
 
 	pendingPayments := 0
-	for _, sess := range activeSessions {
-		payments, _ := s.repo.GetPaymentsBySessionID(ctx, sess.ID)
-		for _, p := range payments {
-			if p.Status == payment.StatePendingConfirmation {
-				pendingPayments++
+	if len(activeSessions) > 0 {
+		activeSessionIDs := make([]uuid.UUID, 0, len(activeSessions))
+		for _, sess := range activeSessions {
+			activeSessionIDs = append(activeSessionIDs, sess.ID)
+		}
+		paymentsBySession, _ := s.repo.GetPaymentsBySessionIDs(ctx, activeSessionIDs)
+		for _, payments := range paymentsBySession {
+			for _, p := range payments {
+				if p.Status == payment.StatePendingConfirmation {
+					pendingPayments++
+				}
 			}
 		}
 	}
 
-	forecasts, _ := s.GetSalesForecast(ctx, restaurantID, 7)
 	var forecast7Minor int64
 	for _, f := range forecasts {
 		forecast7Minor += f.ExpectedGMV.AmountMinorUnits
@@ -357,12 +456,20 @@ type TableStats struct {
 }
 
 func (s *AnalyticsService) GetTablePerformance(ctx context.Context, restaurantID uuid.UUID) ([]TableStats, error) {
-	tables, err := s.repo.ListTables(ctx, restaurantID)
-	if err != nil {
-		return nil, err
-	}
+	var (
+		tables         []restaurant.Table
+		activeSessions []session.DiningSession
+		tableErr       error
+	)
+	var wg sync.WaitGroup
+	wg.Add(2)
+	go func() { defer wg.Done(); tables, tableErr = s.repo.ListTables(ctx, restaurantID) }()
+	go func() { defer wg.Done(); activeSessions, _ = s.repo.ListActiveSessions(ctx, restaurantID) }()
+	wg.Wait()
 
-	activeSessions, _ := s.repo.ListActiveSessions(ctx, restaurantID)
+	if tableErr != nil {
+		return nil, tableErr
+	}
 	activeTableMap := make(map[uuid.UUID]bool)
 	for _, sess := range activeSessions {
 		activeTableMap[sess.TableID] = true
@@ -475,8 +582,24 @@ func (s *AnalyticsService) GetExecutiveAnalytics(ctx context.Context, restaurant
 		endT = time.Date(nowInLoc.Year(), nowInLoc.Month(), nowInLoc.Day(), 23, 59, 59, 999999999, loc).UTC()
 	}
 
-	// 1. Fetch Orders in range
-	orders, _ := s.repo.ListOrders(ctx, restaurantID, 5000, &startT, &endT)
+	// 1. Fetch independent data in parallel: orders, expenses, dish margins, inventory
+	var (
+		orders      []order.Order
+		expenses    []expense.Expense
+		dishMargins []inventory.DishMargin
+		items       []inventory.InventoryItem
+	)
+	var wg sync.WaitGroup
+	wg.Add(4)
+	go func() { defer wg.Done(); orders, _ = s.repo.ListOrders(ctx, restaurantID, 5000, &startT, &endT) }()
+	go func() {
+		defer wg.Done()
+		expenses, _ = s.repo.ListExpenses(ctx, restaurantID, nil, nil, &startT, &endT)
+	}()
+	go func() { defer wg.Done(); dishMargins, _ = s.repo.ListDishMargins(ctx, restaurantID) }()
+	go func() { defer wg.Done(); items, _ = s.repo.ListInventoryItems(ctx, restaurantID) }()
+	wg.Wait()
+
 	var totalGrossRevenueMinor int64
 	var orderCount int
 	dailyMap := make(map[string]*DailySalesTrend)
@@ -520,18 +643,23 @@ func (s *AnalyticsService) GetExecutiveAnalytics(ctx context.Context, restaurant
 		}
 	}
 
-	// 2. Fetch Payments for sessions
-	for sessID := range sessionSeen {
-		payments, _ := s.repo.GetPaymentsBySessionID(ctx, sessID)
-		for _, p := range payments {
-			if p.Status == payment.StateConfirmed {
-				paymentMethods[string(p.Method)] += p.Amount.AmountMinorUnits
+	// 2. Fetch Payments for sessions (batch, not N+1)
+	if len(sessionSeen) > 0 {
+		sessionIDs := make([]uuid.UUID, 0, len(sessionSeen))
+		for sessID := range sessionSeen {
+			sessionIDs = append(sessionIDs, sessID)
+		}
+		paymentsBySession, _ := s.repo.GetPaymentsBySessionIDs(ctx, sessionIDs)
+		for _, payments := range paymentsBySession {
+			for _, p := range payments {
+				if p.Status == payment.StateConfirmed {
+					paymentMethods[string(p.Method)] += p.Amount.AmountMinorUnits
+				}
 			}
 		}
 	}
 
-	// 3. Fetch Expenses in range
-	expenses, _ := s.repo.ListExpenses(ctx, restaurantID, nil, nil, &startT, &endT)
+	// 3. Process expenses (already fetched in parallel)
 	var cogsVariableMinor int64
 	var fixedExpensesMinor int64
 
@@ -559,8 +687,7 @@ func (s *AnalyticsService) GetExecutiveAnalytics(ctx context.Context, restaurant
 		netMarginPct = float64(netProfitMinor) / float64(totalGrossRevenueMinor) * 100.0
 	}
 
-	// 4. Enrich dish margins
-	dishMargins, _ := s.repo.ListDishMargins(ctx, restaurantID)
+	// 4. Enrich dish margins (already fetched in parallel)
 	marginLookup := make(map[string]inventory.DishMargin)
 	for _, dm := range dishMargins {
 		marginLookup[dm.MenuItemName] = dm
@@ -594,8 +721,7 @@ func (s *AnalyticsService) GetExecutiveAnalytics(ctx context.Context, restaurant
 		return salesTrend[i].Date < salesTrend[j].Date
 	})
 
-	// 6. Low stock alerts count
-	items, _ := s.repo.ListInventoryItems(ctx, restaurantID)
+	// 6. Low stock alerts count (already fetched in parallel)
 	var lowStockCount int
 	for _, it := range items {
 		if it.IsLowStock() {

@@ -115,10 +115,11 @@ func (s *ExpenseService) CreateExpense(ctx context.Context, input CreateExpenseI
 		return nil, err
 	}
 
-	// Auto stock-in for linked inventory items
+	// Auto stock-in for linked inventory items — single transaction for all line items
+	invLogs := make([]*inventory.InventoryLog, 0, len(domainLineItems))
 	for _, li := range domainLineItems {
 		if li.InventoryItemID != nil && *li.InventoryItemID != uuid.Nil && li.Quantity > 0 {
-			invLog := &inventory.InventoryLog{
+			invLogs = append(invLogs, &inventory.InventoryLog{
 				ID:              uuid.New(),
 				RestaurantID:    e.RestaurantID,
 				InventoryItemID: *li.InventoryItemID,
@@ -129,10 +130,10 @@ func (s *ExpenseService) CreateExpense(ctx context.Context, input CreateExpenseI
 				Reference:       "Expense: " + e.Title,
 				ExpenseID:       &e.ID,
 				LoggedAt:        now,
-			}
-			_ = s.repo.CreateInventoryLog(ctx, invLog)
+			})
 		}
 	}
+	_ = s.repo.CreateInventoryLogs(ctx, invLogs)
 
 	return e, nil
 }

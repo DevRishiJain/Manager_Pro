@@ -52,7 +52,7 @@ func SubscriptionGateMiddleware(repo storage.Repository, jwtSecret []byte) func(
 			}
 
 			if restID != uuid.Nil {
-				rest, err := repo.GetSubscription(r.Context(), restID)
+				rest, err := cachedGetSubscription(repo, r.Context(), restID)
 				if err == nil && rest != nil {
 					if !rest.IsSubscriptionActive() {
 						w.Header().Set("Content-Type", "application/json")

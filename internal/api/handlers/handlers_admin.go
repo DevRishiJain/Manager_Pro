@@ -6,32 +6,47 @@ import (
 	"sort"
 	"strconv"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/devrishijain/table-manager/internal/api/middleware"
+	"github.com/devrishijain/table-manager/internal/domain/audit"
 	"github.com/devrishijain/table-manager/internal/domain/exitpass"
 	"github.com/devrishijain/table-manager/internal/domain/order"
 	"github.com/devrishijain/table-manager/internal/domain/restaurant"
+	"github.com/devrishijain/table-manager/internal/domain/session"
 	"github.com/go-chi/chi/v5"
 	"github.com/google/uuid"
 )
 
 // GetAdminOverview returns platform-wide aggregate counts and today's volume.
 func (h *APIHandler) GetAdminOverview(w http.ResponseWriter, r *http.Request) {
-	allRests, _ := h.repo.ListRestaurants(r.Context())
-	franchises, _ := h.repo.ListFranchises(r.Context())
-
 	nowUTC := time.Now().UTC()
 	dayStart := time.Date(nowUTC.Year(), nowUTC.Month(), nowUTC.Day(), 0, 0, 0, 0, time.UTC)
+
+	var (
+		allRests     []restaurant.Restaurant
+		franchises   []restaurant.Franchise
+		liveSessions int
+		todayOrders  []order.Order
+		platformGMV  int64
+		platformFee  int64
+	)
+	var wg sync.WaitGroup
+	wg.Add(5)
+	go func() { defer wg.Done(); allRests, _ = h.repo.ListRestaurants(r.Context()) }()
+	go func() { defer wg.Done(); franchises, _ = h.repo.ListFranchises(r.Context()) }()
+	go func() { defer wg.Done(); liveSessions, _ = h.repo.CountActiveSessionsAll(r.Context()) }()
+	go func() {
+		defer wg.Done()
+		todayOrders, _ = h.repo.ListRecentOrdersAllRestaurants(r.Context(), 500, &dayStart, nil)
+	}()
+	go func() { defer wg.Done(); platformGMV, platformFee, _ = h.repo.SumPlatformFeesAll(r.Context()) }()
+	wg.Wait()
 
 	total, active, suspended := 0, 0, 0
 	franchiseOutlets, single := 0, 0
 	activeSubs, expiredSubs := 0, 0
-	liveSessions := 0
-	ordersToday := 0
-	var revenueToday int64
-	var platformGMV int64
-	var platformFee int64
 
 	for _, rest := range allRests {
 		if rest.ID == restaurant.PlatformRestaurantID {
@@ -53,25 +68,16 @@ func (h *APIHandler) GetAdminOverview(w http.ResponseWriter, r *http.Request) {
 		} else {
 			expiredSubs++
 		}
+	}
 
-		if sessions, err := h.repo.ListActiveSessions(r.Context(), rest.ID); err == nil {
-			liveSessions += len(sessions)
+	ordersToday := 0
+	var revenueToday int64
+	for _, o := range todayOrders {
+		if o.Status == order.StateCancelled || o.Status == order.StateRejected {
+			continue
 		}
-		if orders, err := h.orderService.ListOrders(r.Context(), rest.ID, 500, &dayStart, nil); err == nil {
-			for _, o := range orders {
-				if o.Status == order.StateCancelled || o.Status == order.StateRejected {
-					continue
-				}
-				ordersToday++
-				revenueToday += o.Total.AmountMinorUnits
-			}
-		}
-		if fees, err := h.repo.ListPlatformFees(r.Context(), rest.ID, ""); err == nil {
-			for _, f := range fees {
-				platformGMV += f.GMVAmount.AmountMinorUnits
-				platformFee += f.FeeAmount.AmountMinorUnits
-			}
-		}
+		ordersToday++
+		revenueToday += o.Total.AmountMinorUnits
 	}
 
 	jsonResponse(w, http.StatusOK, map[string]interface{}{
@@ -99,24 +105,72 @@ func (h *APIHandler) GetAdminFranchises(w http.ResponseWriter, r *http.Request) 
 		return
 	}
 
+	// Batch fetch all restaurants and group by franchise (1 query instead of N)
+	allRests, _ := h.repo.ListRestaurants(r.Context())
+	restsByFranchise := make(map[uuid.UUID][]restaurant.Restaurant)
+	for _, rest := range allRests {
+		if rest.ID == restaurant.PlatformRestaurantID || rest.FranchiseID == nil {
+			continue
+		}
+		restsByFranchise[*rest.FranchiseID] = append(restsByFranchise[*rest.FranchiseID], rest)
+	}
+
+	// Batch fetch all outlet enrichment data (parallel with owner fetch)
+	var allOutlets []restaurant.Restaurant
+	for _, rests := range restsByFranchise {
+		allOutlets = append(allOutlets, rests...)
+	}
+	enrichedByRestID := make(map[uuid.UUID]map[string]interface{})
+	ownerByID := make(map[uuid.UUID]*restaurant.StaffUser)
+
+	ownerIDs := make(map[uuid.UUID]bool)
+	for _, fr := range franchises {
+		if fr.OwnerStaffID != nil {
+			ownerIDs[*fr.OwnerStaffID] = true
+		}
+	}
+
+	var wg sync.WaitGroup
+	wg.Add(2)
+	go func() {
+		defer wg.Done()
+		if len(allOutlets) > 0 {
+			enrichedOutlets := h.enrichOutletsBatch(r.Context(), allOutlets)
+			for _, e := range enrichedOutlets {
+				if id, ok := e["id"].(uuid.UUID); ok {
+					enrichedByRestID[id] = e
+				}
+			}
+		}
+	}()
+	go func() {
+		defer wg.Done()
+		if len(ownerIDs) > 0 {
+			ids := make([]uuid.UUID, 0, len(ownerIDs))
+			for id := range ownerIDs {
+				ids = append(ids, id)
+			}
+			ownerByID, _ = h.repo.GetStaffByIDs(r.Context(), ids)
+		}
+	}()
+	wg.Wait()
+
 	out := make([]map[string]interface{}, 0, len(franchises))
 	for _, fr := range franchises {
-		outlets, _ := h.repo.ListRestaurantsByFranchise(r.Context(), fr.ID)
-
-		ownerName, ownerEmail := "", ""
-		if fr.OwnerStaffID != nil {
-			if staff, err := h.repo.GetStaffByID(r.Context(), *fr.OwnerStaffID); err == nil && staff != nil {
-				ownerName = staff.Name
-				ownerEmail = staff.Email
+		outlets := restsByFranchise[fr.ID]
+		enrichedOutlets := make([]map[string]interface{}, 0, len(outlets))
+		for _, rest := range outlets {
+			if e, ok := enrichedByRestID[rest.ID]; ok {
+				enrichedOutlets = append(enrichedOutlets, e)
 			}
 		}
 
-		enrichedOutlets := make([]map[string]interface{}, 0, len(outlets))
-		for _, rest := range outlets {
-			if rest.ID == restaurant.PlatformRestaurantID {
-				continue
+		ownerName, ownerEmail := "", ""
+		if fr.OwnerStaffID != nil {
+			if staff, ok := ownerByID[*fr.OwnerStaffID]; ok && staff != nil {
+				ownerName = staff.Name
+				ownerEmail = staff.Email
 			}
-			enrichedOutlets = append(enrichedOutlets, h.outletInfo(r.Context(), rest))
 		}
 
 		out = append(out, map[string]interface{}{
@@ -147,7 +201,77 @@ func (h *APIHandler) GetRestaurantActivity(w http.ResponseWriter, r *http.Reques
 		return
 	}
 
-	enriched := h.outletInfo(r.Context(), *rest)
+	// Parallelize all independent queries — outletInfo is replaced by direct batch fetches
+	// to avoid redundant ListTables/ListActiveSessions/ListOrders calls
+	now := time.Now().UTC()
+	dayStart := time.Date(now.Year(), now.Month(), now.Day(), 0, 0, 0, 0, time.UTC)
+	thirtyDaysAgo := dayStart.AddDate(0, 0, -30)
+
+	var (
+		tables         []restaurant.Table
+		activeSessions []session.DiningSession
+		ordersToday    []order.Order
+		orders30d      []order.Order
+		orders         []order.Order
+		staffList      []restaurant.StaffUser
+		auditLogs      []audit.AuditLog
+	)
+	var wg sync.WaitGroup
+	wg.Add(7)
+
+	go func() { defer wg.Done(); tables, _ = h.repo.ListTables(r.Context(), restID) }()
+	go func() { defer wg.Done(); activeSessions, _ = h.repo.ListActiveSessions(r.Context(), restID) }()
+	go func() {
+		defer wg.Done()
+		ordersToday, _ = h.orderService.ListOrders(r.Context(), restID, 500, &dayStart, nil)
+	}()
+	go func() {
+		defer wg.Done()
+		orders30d, _ = h.orderService.ListOrders(r.Context(), restID, 500, &thirtyDaysAgo, nil)
+	}()
+	go func() { defer wg.Done(); orders, _ = h.orderService.ListOrders(r.Context(), restID, 50, nil, nil) }()
+	go func() { defer wg.Done(); staffList, _ = h.repo.ListStaff(r.Context(), restID) }()
+	go func() { defer wg.Done(); auditLogs, _ = h.repo.ListAuditLogs(r.Context(), restID, 30, 0) }()
+	wg.Wait()
+
+	// Build enriched outlet info from fetched data (no extra queries)
+	ordersTodayCount := 0
+	var revenueToday int64
+	for _, o := range ordersToday {
+		if o.Status != order.StateCancelled && o.Status != order.StateRejected {
+			ordersTodayCount++
+			revenueToday += o.Total.AmountMinorUnits
+		}
+	}
+	var revenue30d int64
+	for _, o := range orders30d {
+		if o.Status != order.StateCancelled && o.Status != order.StateRejected {
+			revenue30d += o.Total.AmountMinorUnits
+		}
+	}
+	enriched := map[string]interface{}{
+		"id":                     rest.ID,
+		"name":                   rest.Name,
+		"slug":                   rest.Slug,
+		"theme":                  rest.Theme,
+		"venue_type":             rest.VenueType,
+		"status":                 rest.Status,
+		"subscription_plan":      rest.SubscriptionPlan,
+		"subscription_status":    rest.SubscriptionStatus,
+		"subscription_end_at":    rest.SubscriptionEndAt,
+		"days_remaining":         rest.DaysRemaining(),
+		"is_active":              rest.IsSubscriptionActive(),
+		"is_subscription_active": rest.IsSubscriptionActive(),
+		"franchise_id":           rest.FranchiseID,
+		"franchise_name":         rest.FranchiseName,
+		"ownership_type":         rest.OwnershipType,
+		"table_count":            len(tables),
+		"active_sessions":        len(activeSessions),
+		"orders_today":           ordersTodayCount,
+		"revenue_today_minor":    revenueToday,
+		"revenue_30d_minor":      revenue30d,
+		"created_at":             rest.CreatedAt,
+	}
 
 	subscription := map[string]interface{}{
 		"plan":           rest.SubscriptionPlan,
@@ -157,8 +281,6 @@ func (h *APIHandler) GetRestaurantActivity(w http.ResponseWriter, r *http.Reques
 		"is_active":      rest.IsSubscriptionActive(),
 	}
 
-	tables, _ := h.repo.ListTables(r.Context(), restID)
-	activeSessions, _ := h.repo.ListActiveSessions(r.Context(), restID)
 	sessionsByTable := make(map[uuid.UUID]int, len(activeSessions))
 	for _, s := range activeSessions {
 		sessionsByTable[s.TableID] = 1
@@ -189,12 +311,27 @@ func (h *APIHandler) GetRestaurantActivity(w http.ResponseWriter, r *http.Reques
 		tableView = append(tableView, entry)
 	}
 
-	orders, _ := h.orderService.ListOrders(r.Context(), restID, 50, nil, nil)
+	// Batch fetch staff names instead of N+1 per-order queries
+	staffIDs := make(map[uuid.UUID]bool)
+	for _, o := range orders {
+		if o.AcceptedByStaffID != nil {
+			staffIDs[*o.AcceptedByStaffID] = true
+		}
+	}
+	staffByID := make(map[uuid.UUID]*restaurant.StaffUser)
+	if len(staffIDs) > 0 {
+		ids := make([]uuid.UUID, 0, len(staffIDs))
+		for id := range staffIDs {
+			ids = append(ids, id)
+		}
+		staffByID, _ = h.repo.GetStaffByIDs(r.Context(), ids)
+	}
+
 	recentOrders := make([]map[string]interface{}, 0, len(orders))
 	for _, o := range orders {
 		acceptedByName := ""
 		if o.AcceptedByStaffID != nil {
-			if st, err := h.repo.GetStaffByID(r.Context(), *o.AcceptedByStaffID); err == nil && st != nil {
+			if st, ok := staffByID[*o.AcceptedByStaffID]; ok && st != nil {
 				acceptedByName = st.Name
 			}
 		}
@@ -211,7 +348,6 @@ func (h *APIHandler) GetRestaurantActivity(w http.ResponseWriter, r *http.Reques
 		})
 	}
 
-	staffList, _ := h.repo.ListStaff(r.Context(), restID)
 	staffView := make([]map[string]interface{}, 0, len(staffList))
 	for _, st := range staffList {
 		staffView = append(staffView, map[string]interface{}{
@@ -224,8 +360,6 @@ func (h *APIHandler) GetRestaurantActivity(w http.ResponseWriter, r *http.Reques
 			"is_active":   st.IsActive,
 		})
 	}
-
-	auditLogs, _ := h.repo.ListAuditLogs(r.Context(), restID, 30, 0)
 
 	jsonResponse(w, http.StatusOK, map[string]interface{}{
 		"restaurant":      enriched,
@@ -248,6 +382,13 @@ func (h *APIHandler) GetActivityFeed(w http.ResponseWriter, r *http.Request) {
 	}
 
 	rests, _ := h.repo.ListRestaurants(r.Context())
+	restNameByID := make(map[uuid.UUID]string, len(rests))
+	for _, rest := range rests {
+		if rest.ID == restaurant.PlatformRestaurantID {
+			continue
+		}
+		restNameByID[rest.ID] = rest.Name
+	}
 
 	type feedItem struct {
 		RestaurantID   uuid.UUID `json:"restaurant_id"`
@@ -258,33 +399,32 @@ func (h *APIHandler) GetActivityFeed(w http.ResponseWriter, r *http.Request) {
 		PlacedAt       time.Time `json:"placed_at"`
 	}
 
-	var items []feedItem
-	for _, rest := range rests {
-		if rest.ID == restaurant.PlatformRestaurantID {
+	// Single query across all restaurants instead of N queries
+	orders, err := h.repo.ListRecentOrdersAllRestaurants(r.Context(), limit, nil, nil)
+	if err != nil || len(orders) == 0 {
+		jsonResponse(w, http.StatusOK, []feedItem{})
+		return
+	}
+
+	items := make([]feedItem, 0, len(orders))
+	for _, o := range orders {
+		name, ok := restNameByID[o.RestaurantID]
+		if !ok {
 			continue
 		}
-		orders, err := h.orderService.ListOrders(r.Context(), rest.ID, limit, nil, nil)
-		if err != nil {
-			continue
-		}
-		for _, o := range orders {
-			items = append(items, feedItem{
-				RestaurantID:   rest.ID,
-				RestaurantName: rest.Name,
-				TableNumber:    o.TableNumber,
-				Status:         string(o.Status),
-				Total:          o.Total.AmountMinorUnits,
-				PlacedAt:       o.PlacedAt,
-			})
-		}
+		items = append(items, feedItem{
+			RestaurantID:   o.RestaurantID,
+			RestaurantName: name,
+			TableNumber:    o.TableNumber,
+			Status:         string(o.Status),
+			Total:          o.Total.AmountMinorUnits,
+			PlacedAt:       o.PlacedAt,
+		})
 	}
 
 	sort.Slice(items, func(i, j int) bool { return items[i].PlacedAt.After(items[j].PlacedAt) })
 	if len(items) > limit {
 		items = items[:limit]
-	}
-	if items == nil {
-		items = []feedItem{}
 	}
 
 	jsonResponse(w, http.StatusOK, items)

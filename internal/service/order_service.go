@@ -73,15 +73,27 @@ func (s *OrderService) PlaceOrder(ctx context.Context, sessionID uuid.UUID, cart
 	var subtotalMinor int64
 	var taxTotalMinor int64
 
+	// Batch-fetch menu catalog & variants upfront (2 queries instead of 2×N)
+	menuItemIDs := make([]uuid.UUID, 0, len(cartItems))
+	variantIDs := make([]uuid.UUID, 0, len(cartItems))
+	for _, item := range cartItems {
+		menuItemIDs = append(menuItemIDs, item.MenuItemID)
+		if item.VariantID != nil && *item.VariantID != uuid.Nil {
+			variantIDs = append(variantIDs, *item.VariantID)
+		}
+	}
+	menuItemsByID, _ := s.repo.GetMenuItemsByIDs(ctx, menuItemIDs)
+	variantsByID, _ := s.repo.GetMenuItemVariantsByIDs(ctx, variantIDs)
+
 	// Fetch current menu catalog & snapshot prices
 	for _, item := range cartItems {
 		if item.Quantity <= 0 {
 			return nil, nil, errors.New("item quantity must be greater than 0")
 		}
 
-		menuItem, err := s.repo.GetMenuItemByID(ctx, item.MenuItemID)
-		if err != nil {
-			return nil, nil, fmt.Errorf("item %s not found: %w", item.MenuItemID, err)
+		menuItem, ok := menuItemsByID[item.MenuItemID]
+		if !ok || menuItem == nil {
+			return nil, nil, fmt.Errorf("item %s not found", item.MenuItemID)
 		}
 		if !menuItem.IsAvailable {
 			return nil, nil, fmt.Errorf("%w: %s (%s)", order.ErrItemOutOfStock, menuItem.Name, menuItem.ID)
@@ -91,8 +103,8 @@ func (s *OrderService) PlaceOrder(ctx context.Context, sessionID uuid.UUID, cart
 		itemNameSnapshot := menuItem.Name
 		// Optional portion/variant selection (e.g. Half / Full)
 		if item.VariantID != nil && *item.VariantID != uuid.Nil {
-			variant, verr := s.repo.GetMenuItemVariantByID(ctx, *item.VariantID)
-			if verr != nil || variant == nil || variant.MenuItemID != menuItem.ID || !variant.IsAvailable {
+			variant, ok := variantsByID[*item.VariantID]
+			if !ok || variant == nil || variant.MenuItemID != menuItem.ID || !variant.IsAvailable {
 				return nil, nil, fmt.Errorf("invalid or unavailable variant for item %s", menuItem.Name)
 			}
 			unitPrice = variant.Price
@@ -570,11 +582,12 @@ func (s *OrderService) depleteOrderIngredients(ctx context.Context, ord *order.O
 	}
 
 	now := time.Now().UTC()
+	logs := make([]*inventory.InventoryLog, 0, len(reqs))
 	for _, req := range reqs {
 		if req.Quantity <= 0 {
 			continue
 		}
-		invLog := &inventory.InventoryLog{
+		logs = append(logs, &inventory.InventoryLog{
 			ID:              uuid.New(),
 			RestaurantID:    ord.RestaurantID,
 			InventoryItemID: req.InventoryItemID,
@@ -583,9 +596,9 @@ func (s *OrderService) depleteOrderIngredients(ctx context.Context, ord *order.O
 			Reference:       fmt.Sprintf("Order #%d Table %s", ord.SequenceNumber, ord.TableNumber),
 			OrderID:         &ord.ID,
 			LoggedAt:        now,
-		}
-		_ = s.repo.CreateInventoryLog(ctx, invLog)
+		})
 	}
+	_ = s.repo.CreateInventoryLogs(ctx, logs)
 }
 
 func (s *OrderService) restoreOrderIngredients(ctx context.Context, ord *order.Order) {
@@ -613,11 +626,12 @@ func (s *OrderService) restoreOrderIngredients(ctx context.Context, ord *order.O
 	}
 
 	now := time.Now().UTC()
+	logs := make([]*inventory.InventoryLog, 0, len(reqs))
 	for _, req := range reqs {
 		if req.Quantity <= 0 {
 			continue
 		}
-		invLog := &inventory.InventoryLog{
+		logs = append(logs, &inventory.InventoryLog{
 			ID:              uuid.New(),
 			RestaurantID:    ord.RestaurantID,
 			InventoryItemID: req.InventoryItemID,
@@ -626,9 +640,9 @@ func (s *OrderService) restoreOrderIngredients(ctx context.Context, ord *order.O
 			Reference:       fmt.Sprintf("Restored from cancelled Order #%d", ord.SequenceNumber),
 			OrderID:         &ord.ID,
 			LoggedAt:        now,
-		}
-		_ = s.repo.CreateInventoryLog(ctx, invLog)
+		})
 	}
+	_ = s.repo.CreateInventoryLogs(ctx, logs)
 }
 
 func (s *OrderService) GetOrdersBySessionID(ctx context.Context, sessionID uuid.UUID) ([]order.Order, error) {

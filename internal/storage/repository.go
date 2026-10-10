@@ -59,6 +59,8 @@ type Repository interface {
 	GetActiveSessionByTableID(ctx context.Context, tableID uuid.UUID) (*session.DiningSession, error)
 	UpdateSession(ctx context.Context, s *session.DiningSession) error
 	ListActiveSessions(ctx context.Context, restaurantID uuid.UUID) ([]session.DiningSession, error)
+	ListActiveSessionsAll(ctx context.Context) ([]session.DiningSession, error)
+	GetSessionsByIDs(ctx context.Context, ids []uuid.UUID) (map[uuid.UUID]*session.DiningSession, error)
 	AddParticipant(ctx context.Context, p *session.SessionParticipant) error
 	GetParticipants(ctx context.Context, sessionID uuid.UUID) ([]session.SessionParticipant, error)
 
@@ -66,10 +68,14 @@ type Repository interface {
 	CreateOrder(ctx context.Context, o *order.Order, items []order.OrderItem) error
 	GetOrderByID(ctx context.Context, id uuid.UUID) (*order.Order, error)
 	GetOrdersBySessionID(ctx context.Context, sessionID uuid.UUID) ([]order.Order, error)
+	GetOrdersBySessionIDs(ctx context.Context, sessionIDs []uuid.UUID) (map[uuid.UUID][]order.Order, error)
 	UpdateOrder(ctx context.Context, o *order.Order) error
 	ListKitchenQueue(ctx context.Context, restaurantID uuid.UUID, statuses []order.State) ([]order.Order, error)
 	ListPendingOrders(ctx context.Context, restaurantID uuid.UUID) ([]order.Order, error)
 	ListOrders(ctx context.Context, restaurantID uuid.UUID, limit int, startDate, endDate *time.Time) ([]order.Order, error)
+	ListRecentOrdersAllRestaurants(ctx context.Context, limit int, startDate, endDate *time.Time) ([]order.Order, error)
+	CountActiveSessionsAll(ctx context.Context) (int, error)
+	SumPlatformFeesAll(ctx context.Context) (gmvMinor int64, feeMinor int64, err error)
 	RecordOrderStatusHistory(ctx context.Context, h *order.StatusHistory) error
 	GetOrderStatusHistory(ctx context.Context, orderID uuid.UUID) ([]order.StatusHistory, error)
 
@@ -77,6 +83,7 @@ type Repository interface {
 	CreatePayment(ctx context.Context, p *payment.Payment) error
 	GetPaymentByID(ctx context.Context, id uuid.UUID) (*payment.Payment, error)
 	GetPaymentsBySessionID(ctx context.Context, sessionID uuid.UUID) ([]payment.Payment, error)
+	GetPaymentsBySessionIDs(ctx context.Context, sessionIDs []uuid.UUID) (map[uuid.UUID][]payment.Payment, error)
 	UpdatePayment(ctx context.Context, p *payment.Payment) error
 	CreateRefund(ctx context.Context, r *payment.Refund) error
 	GetRefundsBySessionID(ctx context.Context, sessionID uuid.UUID) ([]payment.Refund, error)
@@ -108,10 +115,12 @@ type Repository interface {
 	GetTableByID(ctx context.Context, id uuid.UUID) (*restaurant.Table, error)
 	GetTableByToken(ctx context.Context, token string) (*restaurant.Table, error)
 	ListTables(ctx context.Context, restaurantID uuid.UUID) ([]restaurant.Table, error)
+	ListTablesAll(ctx context.Context) ([]restaurant.Table, error)
 	UpdateTable(ctx context.Context, t *restaurant.Table) error
 
 	CreateStaff(ctx context.Context, s *restaurant.StaffUser) error
 	GetStaffByID(ctx context.Context, id uuid.UUID) (*restaurant.StaffUser, error)
+	GetStaffByIDs(ctx context.Context, ids []uuid.UUID) (map[uuid.UUID]*restaurant.StaffUser, error)
 	GetStaffByEmail(ctx context.Context, email string) (*restaurant.StaffUser, error)
 	GetStaffByEmployeeID(ctx context.Context, restaurantID uuid.UUID, employeeID string) (*restaurant.StaffUser, error)
 	GetStaffByEmployeeIDGlobal(ctx context.Context, employeeID string) (*restaurant.StaffUser, error)
@@ -126,11 +135,13 @@ type Repository interface {
 	ListCategories(ctx context.Context, restaurantID uuid.UUID) ([]restaurant.MenuCategory, error)
 	CreateMenuItem(ctx context.Context, m *restaurant.MenuItem) error
 	GetMenuItemByID(ctx context.Context, id uuid.UUID) (*restaurant.MenuItem, error)
+	GetMenuItemsByIDs(ctx context.Context, ids []uuid.UUID) (map[uuid.UUID]*restaurant.MenuItem, error)
 	ListMenuItems(ctx context.Context, restaurantID uuid.UUID) ([]restaurant.MenuItem, error)
 	UpdateMenuItemAvailability(ctx context.Context, id uuid.UUID, isAvailable bool) error
 	ListVariantsByMenuItemIDs(ctx context.Context, menuItemIDs []uuid.UUID) (map[uuid.UUID][]restaurant.MenuItemVariant, error)
 	ReplaceMenuItemVariants(ctx context.Context, menuItemID uuid.UUID, variants []restaurant.MenuItemVariant) error
 	GetMenuItemVariantByID(ctx context.Context, id uuid.UUID) (*restaurant.MenuItemVariant, error)
+	GetMenuItemVariantsByIDs(ctx context.Context, ids []uuid.UUID) (map[uuid.UUID]*restaurant.MenuItemVariant, error)
 
 	GetSettings(ctx context.Context, restaurantID uuid.UUID) (*restaurant.RestaurantSettings, error)
 	UpdateSettings(ctx context.Context, s *restaurant.RestaurantSettings) error
@@ -189,6 +200,7 @@ type Repository interface {
 	UpdateInventoryItem(ctx context.Context, item *inventory.InventoryItem) error
 	DeleteInventoryItem(ctx context.Context, restaurantID, id uuid.UUID) error
 	CreateInventoryLog(ctx context.Context, log *inventory.InventoryLog) error
+	CreateInventoryLogs(ctx context.Context, logs []*inventory.InventoryLog) error
 	ListInventoryLogs(ctx context.Context, restaurantID uuid.UUID, itemID *uuid.UUID, limit int) ([]inventory.InventoryLog, error)
 
 	// Recipes & Costing

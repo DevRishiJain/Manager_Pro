@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/devrishijain/table-manager/internal/domain/audit"
@@ -26,6 +27,16 @@ import (
 type PostgresRepository struct {
 	pool *pgxpool.Pool
 	mem  *memory.MemoryRepository
+
+	// Short-TTL restaurant cache — saves one RTT on hot read paths (analytics, admin).
+	// Invalidated on UpdateRestaurant. 30s staleness window matches subscription cache.
+	restCacheMu sync.RWMutex
+	restCache   map[uuid.UUID]restaurantCacheEntry
+}
+
+type restaurantCacheEntry struct {
+	rest      *restaurant.Restaurant
+	expiresAt time.Time
 }
 
 func NewPostgresRepository(pool *pgxpool.Pool) *PostgresRepository {
@@ -85,8 +96,9 @@ func NewPostgresRepository(pool *pgxpool.Pool) *PostgresRepository {
 		`)
 	}
 	return &PostgresRepository{
-		pool: pool,
-		mem:  memory.NewMemoryRepository(),
+		pool:      pool,
+		mem:       memory.NewMemoryRepository(),
+		restCache: make(map[uuid.UUID]restaurantCacheEntry),
 	}
 }
 
@@ -238,6 +250,86 @@ func (r *PostgresRepository) ListActiveSessions(ctx context.Context, restaurantI
 		}
 	}
 	return r.mem.ListActiveSessions(ctx, restaurantID)
+}
+
+func (r *PostgresRepository) ListActiveSessionsAll(ctx context.Context) ([]session.DiningSession, error) {
+	if r.pool == nil {
+		return r.mem.ListActiveSessionsAll(ctx)
+	}
+	rows, err := r.pool.Query(ctx, `
+		SELECT id, restaurant_id, table_id, status, opened_at, running_total_minor, final_total_minor, platform_fee_minor, currency, session_token, device_fingerprint, last_activity_at, expiry_deadline, version, created_at, updated_at,
+		       COALESCE(customer_name, ''), COALESCE(customer_phone, ''), COALESCE(guest_count, 1), COALESCE(assistance_reason, ''), assistance_requested_at, assigned_waiter_id, COALESCE(assigned_waiter_name, '')
+		FROM dining_sessions
+		WHERE status IN ('OPEN', 'OPEN_VERIFIED', 'AWAITING_PAYMENT', 'PAID')
+		ORDER BY opened_at DESC;
+	`)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var sessions []session.DiningSession
+	for rows.Next() {
+		var s session.DiningSession
+		var statusStr, curr string
+		var runMinor, finMinor, feeMinor int64
+		if err := rows.Scan(&s.ID, &s.RestaurantID, &s.TableID, &statusStr, &s.OpenedAt, &runMinor, &finMinor, &feeMinor, &curr, &s.SessionToken, &s.DeviceFingerprint, &s.LastActivityAt, &s.ExpiryDeadline, &s.Version, &s.CreatedAt, &s.UpdatedAt, &s.CustomerName, &s.CustomerPhone, &s.GuestCount, &s.AssistanceReason, &s.AssistanceRequestedAt, &s.AssignedWaiterID, &s.AssignedWaiterName); err == nil {
+			s.Status = session.State(statusStr)
+			s.RunningTotal = money.New(runMinor)
+			s.FinalTotal = money.New(finMinor)
+			s.PlatformFeeAmount = money.New(feeMinor)
+			sessions = append(sessions, s)
+		}
+	}
+	return sessions, nil
+}
+
+func (r *PostgresRepository) GetSessionsByIDs(ctx context.Context, ids []uuid.UUID) (map[uuid.UUID]*session.DiningSession, error) {
+	if len(ids) == 0 {
+		return map[uuid.UUID]*session.DiningSession{}, nil
+	}
+	if r.pool == nil {
+		result := make(map[uuid.UUID]*session.DiningSession)
+		for _, id := range ids {
+			s, err := r.mem.GetSessionByID(ctx, id)
+			if err == nil {
+				result[id] = s
+			}
+		}
+		return result, nil
+	}
+	args := make([]any, len(ids))
+	for i, id := range ids {
+		args[i] = id
+	}
+	placeholders := make([]string, len(ids))
+	for i := range ids {
+		placeholders[i] = fmt.Sprintf("$%d", i+1)
+	}
+	query := fmt.Sprintf(`
+		SELECT id, restaurant_id, table_id, status, opened_at, running_total_minor, final_total_minor, platform_fee_minor, currency, session_token, device_fingerprint, last_activity_at, expiry_deadline, version, created_at, updated_at,
+		       COALESCE(customer_name, ''), COALESCE(customer_phone, ''), COALESCE(guest_count, 1), COALESCE(assistance_reason, ''), assistance_requested_at, assigned_waiter_id, COALESCE(assigned_waiter_name, '')
+		FROM dining_sessions
+		WHERE id IN (%s);
+	`, strings.Join(placeholders, ","))
+	rows, err := r.pool.Query(ctx, query, args...)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	result := make(map[uuid.UUID]*session.DiningSession)
+	for rows.Next() {
+		var s session.DiningSession
+		var statusStr, curr string
+		var runMinor, finMinor, feeMinor int64
+		if err := rows.Scan(&s.ID, &s.RestaurantID, &s.TableID, &statusStr, &s.OpenedAt, &runMinor, &finMinor, &feeMinor, &curr, &s.SessionToken, &s.DeviceFingerprint, &s.LastActivityAt, &s.ExpiryDeadline, &s.Version, &s.CreatedAt, &s.UpdatedAt, &s.CustomerName, &s.CustomerPhone, &s.GuestCount, &s.AssistanceReason, &s.AssistanceRequestedAt, &s.AssignedWaiterID, &s.AssignedWaiterName); err == nil {
+			s.Status = session.State(statusStr)
+			s.RunningTotal = money.New(runMinor)
+			s.FinalTotal = money.New(finMinor)
+			s.PlatformFeeAmount = money.New(feeMinor)
+			result[s.ID] = &s
+		}
+	}
+	return result, nil
 }
 
 func (r *PostgresRepository) AddParticipant(ctx context.Context, p *session.SessionParticipant) error {
@@ -471,6 +563,74 @@ func (r *PostgresRepository) GetOrdersBySessionID(ctx context.Context, sessionID
 		}
 	}
 	return r.mem.GetOrdersBySessionID(ctx, sessionID)
+}
+
+func (r *PostgresRepository) GetOrdersBySessionIDs(ctx context.Context, sessionIDs []uuid.UUID) (map[uuid.UUID][]order.Order, error) {
+	if len(sessionIDs) == 0 {
+		return map[uuid.UUID][]order.Order{}, nil
+	}
+	if r.pool == nil {
+		result := make(map[uuid.UUID][]order.Order)
+		for _, sid := range sessionIDs {
+			if ords, err := r.mem.GetOrdersBySessionID(ctx, sid); err == nil {
+				result[sid] = ords
+			}
+		}
+		return result, nil
+	}
+	rows, err := r.pool.Query(ctx, `
+		SELECT
+			o.id, o.session_id, o.restaurant_id, o.sequence_number, o.status, o.placed_at,
+			o.accepted_at, o.accepted_by_staff_id, o.subtotal_minor, o.tax_total_minor,
+			o.total_minor, o.version,
+			COALESCE(o.items_summary, '[]'::jsonb) AS items_json
+		FROM orders o
+		WHERE o.session_id = ANY($1)
+		ORDER BY o.sequence_number ASC;
+	`, sessionIDs)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	result := make(map[uuid.UUID][]order.Order)
+	for rows.Next() {
+		var o order.Order
+		var subMinor, taxMinor, totMinor int64
+		var statusStr string
+		var itemsJSON []byte
+		if scanErr := rows.Scan(
+			&o.ID, &o.SessionID, &o.RestaurantID, &o.SequenceNumber, &statusStr, &o.PlacedAt,
+			&o.AcceptedAt, &o.AcceptedByStaffID, &subMinor, &taxMinor, &totMinor, &o.Version, &itemsJSON,
+		); scanErr == nil {
+			o.Status = order.State(statusStr)
+			o.Subtotal = money.New(subMinor)
+			o.TaxTotal = money.New(taxMinor)
+			o.Total = money.New(totMinor)
+			type rawItem struct {
+				ID                  uuid.UUID `json:"id"`
+				OrderID             uuid.UUID `json:"order_id"`
+				MenuItemID          uuid.UUID `json:"menu_item_id"`
+				ItemNameSnapshot    string    `json:"item_name_snapshot"`
+				Quantity            int       `json:"quantity"`
+				UnitPriceMinor      int64     `json:"unit_price_minor"`
+				LineTotalMinor      int64     `json:"line_total_minor"`
+				SpecialInstructions string    `json:"special_instructions"`
+			}
+			var rawItems []rawItem
+			if uerr := json.Unmarshal(itemsJSON, &rawItems); uerr == nil {
+				for _, it := range rawItems {
+					o.Items = append(o.Items, order.OrderItem{
+						ID: it.ID, OrderID: it.OrderID, MenuItemID: it.MenuItemID,
+						ItemNameSnapshot: it.ItemNameSnapshot, Quantity: it.Quantity,
+						UnitPriceSnapshot: money.New(it.UnitPriceMinor), LineTotal: money.New(it.LineTotalMinor),
+						SpecialInstructions: it.SpecialInstructions,
+					})
+				}
+			}
+			result[o.SessionID] = append(result[o.SessionID], o)
+		}
+	}
+	return result, nil
 }
 
 func (r *PostgresRepository) UpdateOrder(ctx context.Context, o *order.Order) error {
@@ -831,6 +991,110 @@ func (r *PostgresRepository) ListOrders(ctx context.Context, restaurantID uuid.U
 	return r.mem.ListOrders(ctx, restaurantID, limit, startDate, endDate)
 }
 
+func (r *PostgresRepository) ListRecentOrdersAllRestaurants(ctx context.Context, limit int, startDate, endDate *time.Time) ([]order.Order, error) {
+	if limit <= 0 || limit > 500 {
+		limit = 100
+	}
+	if r.pool == nil {
+		return r.mem.ListRecentOrdersAllRestaurants(ctx, limit, startDate, endDate)
+	}
+	rows, err := r.pool.Query(ctx, `
+		SELECT
+			o.id, o.session_id, o.restaurant_id, o.sequence_number, o.status, o.placed_at,
+			o.accepted_at, o.accepted_by_staff_id, o.subtotal_minor, o.tax_total_minor, o.total_minor, o.version,
+			COALESCE(NULLIF(o.table_number, ''), NULLIF(t.table_number, ''), 'Table 1') AS table_number,
+			COALESCE(NULLIF(ds.customer_name, ''), 'Guest Diner') AS customer_name,
+			COALESCE(ds.customer_phone, '') AS customer_phone,
+			COALESCE(NULLIF(ds.guest_count, 0), 1) AS guest_count,
+			COALESCE(ds.vehicle_number, '') AS vehicle_number,
+			COALESCE(o.items_summary, '[]'::jsonb) AS items_json
+		FROM orders o
+		LEFT JOIN dining_sessions ds ON ds.id = o.session_id
+		LEFT JOIN tables t ON t.id = ds.table_id
+		WHERE ($2::timestamptz IS NULL OR o.placed_at >= $2)
+		  AND ($3::timestamptz IS NULL OR o.placed_at <= $3)
+		ORDER BY o.placed_at DESC
+		LIMIT $1;
+	`, limit, startDate, endDate)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	orders := make([]order.Order, 0)
+	for rows.Next() {
+		var o order.Order
+		var subMinor, taxMinor, totMinor int64
+		var statusStr string
+		var itemsJSON []byte
+		if err := rows.Scan(
+			&o.ID, &o.SessionID, &o.RestaurantID, &o.SequenceNumber, &statusStr, &o.PlacedAt,
+			&o.AcceptedAt, &o.AcceptedByStaffID, &subMinor, &taxMinor, &totMinor, &o.Version,
+			&o.TableNumber, &o.CustomerName, &o.CustomerPhone, &o.GuestCount, &o.VehicleNumber, &itemsJSON,
+		); err == nil {
+			if o.VehicleNumber != "" {
+				o.TableNumber = "Car " + strings.ToUpper(o.VehicleNumber)
+			}
+			o.Status = order.State(statusStr)
+			o.Subtotal = money.New(subMinor)
+			o.TaxTotal = money.New(taxMinor)
+			o.Total = money.New(totMinor)
+			type rawItem struct {
+				ID                  uuid.UUID `json:"id"`
+				OrderID             uuid.UUID `json:"order_id"`
+				MenuItemID          uuid.UUID `json:"menu_item_id"`
+				ItemNameSnapshot    string    `json:"item_name_snapshot"`
+				Quantity            int       `json:"quantity"`
+				UnitPriceMinor      int64     `json:"unit_price_minor"`
+				LineTotalMinor      int64     `json:"line_total_minor"`
+				SpecialInstructions string    `json:"special_instructions"`
+			}
+			var rawItems []rawItem
+			if err := json.Unmarshal(itemsJSON, &rawItems); err == nil && len(rawItems) > 0 {
+				for _, it := range rawItems {
+					o.Items = append(o.Items, order.OrderItem{
+						ID: it.ID, OrderID: it.OrderID, MenuItemID: it.MenuItemID,
+						ItemNameSnapshot: it.ItemNameSnapshot, Quantity: it.Quantity,
+						UnitPriceSnapshot: money.New(it.UnitPriceMinor), LineTotal: money.New(it.LineTotalMinor),
+						SpecialInstructions: it.SpecialInstructions,
+					})
+				}
+			}
+			orders = append(orders, o)
+		}
+	}
+	return orders, nil
+}
+
+func (r *PostgresRepository) CountActiveSessionsAll(ctx context.Context) (int, error) {
+	if r.pool == nil {
+		return r.mem.CountActiveSessionsAll(ctx)
+	}
+	var count int
+	err := r.pool.QueryRow(ctx, `
+		SELECT COUNT(*) FROM dining_sessions
+		WHERE status NOT IN ('COMPLETED', 'WALKOUT', 'EXPIRED', 'FORCE_CLOSED');
+	`).Scan(&count)
+	if err != nil {
+		return 0, err
+	}
+	return count, nil
+}
+
+func (r *PostgresRepository) SumPlatformFeesAll(ctx context.Context) (int64, int64, error) {
+	if r.pool == nil {
+		return r.mem.SumPlatformFeesAll(ctx)
+	}
+	var gmv, fee int64
+	err := r.pool.QueryRow(ctx, `
+		SELECT COALESCE(SUM(gmv_amount_minor), 0), COALESCE(SUM(fee_amount_minor), 0)
+		FROM platform_fee_ledger;
+	`).Scan(&gmv, &fee)
+	if err != nil {
+		return 0, 0, err
+	}
+	return gmv, fee, nil
+}
+
 func (r *PostgresRepository) RecordOrderStatusHistory(ctx context.Context, h *order.StatusHistory) error {
 	_ = r.mem.RecordOrderStatusHistory(ctx, h)
 	if r.pool != nil {
@@ -952,6 +1216,54 @@ func (r *PostgresRepository) GetPaymentsBySessionID(ctx context.Context, session
 		}
 	}
 	return r.mem.GetPaymentsBySessionID(ctx, sessionID)
+}
+
+func (r *PostgresRepository) GetPaymentsBySessionIDs(ctx context.Context, sessionIDs []uuid.UUID) (map[uuid.UUID][]payment.Payment, error) {
+	if len(sessionIDs) == 0 {
+		return map[uuid.UUID][]payment.Payment{}, nil
+	}
+	if r.pool == nil {
+		result := make(map[uuid.UUID][]payment.Payment)
+		for _, sid := range sessionIDs {
+			payments, err := r.mem.GetPaymentsBySessionID(ctx, sid)
+			if err == nil {
+				result[sid] = payments
+			}
+		}
+		return result, nil
+	}
+	// Build a parameterized IN clause
+	args := make([]any, len(sessionIDs))
+	for i, sid := range sessionIDs {
+		args[i] = sid
+	}
+	placeholders := make([]string, len(sessionIDs))
+	for i := range sessionIDs {
+		placeholders[i] = fmt.Sprintf("$%d", i+1)
+	}
+	query := fmt.Sprintf(`
+		SELECT id, session_id, restaurant_id, method, amount_minor, currency, status, version, created_at, updated_at
+		FROM payments
+		WHERE session_id IN (%s);
+	`, strings.Join(placeholders, ","))
+	rows, err := r.pool.Query(ctx, query, args...)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	result := make(map[uuid.UUID][]payment.Payment)
+	for rows.Next() {
+		var p payment.Payment
+		var methStr, statusStr, curr string
+		var amtMinor int64
+		if scanErr := rows.Scan(&p.ID, &p.SessionID, &p.RestaurantID, &methStr, &amtMinor, &curr, &statusStr, &p.Version, &p.CreatedAt, &p.UpdatedAt); scanErr == nil {
+			p.Method = payment.Method(methStr)
+			p.Status = payment.State(statusStr)
+			p.Amount = money.New(amtMinor)
+			result[p.SessionID] = append(result[p.SessionID], p)
+		}
+	}
+	return result, nil
 }
 
 func (r *PostgresRepository) UpdatePayment(ctx context.Context, p *payment.Payment) error {
@@ -1182,6 +1494,15 @@ func (r *PostgresRepository) franchiseMap(ctx context.Context) map[uuid.UUID]res
 
 func (r *PostgresRepository) GetRestaurantByID(ctx context.Context, id uuid.UUID) (*restaurant.Restaurant, error) {
 	if r.pool != nil {
+		// Check 30s TTL cache first
+		r.restCacheMu.RLock()
+		if entry, ok := r.restCache[id]; ok && time.Now().Before(entry.expiresAt) {
+			cpy := *entry.rest
+			r.restCacheMu.RUnlock()
+			return &cpy, nil
+		}
+		r.restCacheMu.RUnlock()
+
 		var rest restaurant.Restaurant
 		err := r.pool.QueryRow(ctx, `
 			SELECT id, name, COALESCE(slug, ''), COALESCE(theme, 'gold'), gstin, commission_rate_bps, settlement_bank_details, status, timezone,
@@ -1192,6 +1513,10 @@ func (r *PostgresRepository) GetRestaurantByID(ctx context.Context, id uuid.UUID
 		`, id).Scan(&rest.ID, &rest.Name, &rest.Slug, &rest.Theme, &rest.GSTIN, &rest.CommissionRateBps, &rest.SettlementBankDetails, &rest.Status, &rest.Timezone, &rest.SubscriptionPlan, &rest.SubscriptionStatus, &rest.SubscriptionEndAt, &rest.FranchiseID, &rest.CreatedAt, &rest.UpdatedAt)
 		if err == nil {
 			r.fillRestaurantFranchise(ctx, &rest)
+			cached := rest
+			r.restCacheMu.Lock()
+			r.restCache[id] = restaurantCacheEntry{rest: &cached, expiresAt: time.Now().Add(30 * time.Second)}
+			r.restCacheMu.Unlock()
 			return &rest, nil
 		}
 	}
@@ -1255,6 +1580,9 @@ func (r *PostgresRepository) ListRestaurants(ctx context.Context) ([]restaurant.
 
 func (r *PostgresRepository) UpdateRestaurant(ctx context.Context, rest *restaurant.Restaurant) error {
 	if r.pool != nil {
+		r.restCacheMu.Lock()
+		delete(r.restCache, rest.ID)
+		r.restCacheMu.Unlock()
 		_, _ = r.pool.Exec(ctx, `
 			UPDATE restaurants
 			SET name = $1, slug = $2, theme = $3, gstin = $4, commission_rate_bps = $5, settlement_bank_details = $6,
@@ -1355,6 +1683,31 @@ func (r *PostgresRepository) ListTables(ctx context.Context, restaurantID uuid.U
 	return r.mem.ListTables(ctx, restaurantID)
 }
 
+func (r *PostgresRepository) ListTablesAll(ctx context.Context) ([]restaurant.Table, error) {
+	if r.pool == nil {
+		return r.mem.ListTablesAll(ctx)
+	}
+	rows, err := r.pool.Query(ctx, `
+		SELECT id, restaurant_id, table_number, table_token, COALESCE(capacity, 4), is_active, created_at, updated_at
+		FROM tables ORDER BY table_number ASC;
+	`)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var tables []restaurant.Table
+	for rows.Next() {
+		var t restaurant.Table
+		if err := rows.Scan(&t.ID, &t.RestaurantID, &t.TableNumber, &t.TableToken, &t.Capacity, &t.IsActive, &t.CreatedAt, &t.UpdatedAt); err == nil {
+			if t.Capacity <= 0 {
+				t.Capacity = 4
+			}
+			tables = append(tables, t)
+		}
+	}
+	return tables, nil
+}
+
 func (r *PostgresRepository) CreateStaff(ctx context.Context, s *restaurant.StaffUser) error {
 	_ = r.mem.CreateStaff(ctx, s)
 	if r.pool != nil {
@@ -1385,6 +1738,50 @@ func (r *PostgresRepository) GetStaffByID(ctx context.Context, id uuid.UUID) (*r
 		}
 	}
 	return r.mem.GetStaffByID(ctx, id)
+}
+
+func (r *PostgresRepository) GetStaffByIDs(ctx context.Context, ids []uuid.UUID) (map[uuid.UUID]*restaurant.StaffUser, error) {
+	if len(ids) == 0 {
+		return map[uuid.UUID]*restaurant.StaffUser{}, nil
+	}
+	if r.pool == nil {
+		result := make(map[uuid.UUID]*restaurant.StaffUser)
+		for _, id := range ids {
+			s, err := r.mem.GetStaffByID(ctx, id)
+			if err == nil {
+				result[id] = s
+			}
+		}
+		return result, nil
+	}
+	args := make([]any, len(ids))
+	for i, id := range ids {
+		args[i] = id
+	}
+	placeholders := make([]string, len(ids))
+	for i := range ids {
+		placeholders[i] = fmt.Sprintf("$%d", i+1)
+	}
+	query := fmt.Sprintf(`
+		SELECT id, restaurant_id, COALESCE(employee_id, ''), name, phone, email, password_hash, role, is_active, created_at, updated_at
+		FROM staff_users
+		WHERE id IN (%s);
+	`, strings.Join(placeholders, ","))
+	rows, err := r.pool.Query(ctx, query, args...)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	result := make(map[uuid.UUID]*restaurant.StaffUser)
+	for rows.Next() {
+		var s restaurant.StaffUser
+		var roleStr string
+		if scanErr := rows.Scan(&s.ID, &s.RestaurantID, &s.EmployeeID, &s.Name, &s.Phone, &s.Email, &s.PasswordHash, &roleStr, &s.IsActive, &s.CreatedAt, &s.UpdatedAt); scanErr == nil {
+			s.Role = restaurant.Role(roleStr)
+			result[s.ID] = &s
+		}
+	}
+	return result, nil
 }
 
 func (r *PostgresRepository) GetStaffByEmail(ctx context.Context, email string) (*restaurant.StaffUser, error) {
@@ -1623,6 +2020,63 @@ func (r *PostgresRepository) GetMenuItemByID(ctx context.Context, id uuid.UUID) 
 	return r.mem.GetMenuItemByID(ctx, id)
 }
 
+func (r *PostgresRepository) GetMenuItemsByIDs(ctx context.Context, ids []uuid.UUID) (map[uuid.UUID]*restaurant.MenuItem, error) {
+	if len(ids) == 0 {
+		return map[uuid.UUID]*restaurant.MenuItem{}, nil
+	}
+	if r.pool == nil {
+		result := make(map[uuid.UUID]*restaurant.MenuItem)
+		for _, id := range ids {
+			it, err := r.mem.GetMenuItemByID(ctx, id)
+			if err == nil {
+				result[id] = it
+			}
+		}
+		return result, nil
+	}
+	args := make([]any, len(ids))
+	for i, id := range ids {
+		args[i] = id
+	}
+	placeholders := make([]string, len(ids))
+	for i := range ids {
+		placeholders[i] = fmt.Sprintf("$%d", i+1)
+	}
+	query := fmt.Sprintf(`
+		SELECT id, restaurant_id, category_id, name, description, price_minor, currency, is_available, hsn_sac_code, cgst_rate_bps, sgst_rate_bps, created_at, updated_at
+		FROM menu_items
+		WHERE id IN (%s);
+	`, strings.Join(placeholders, ","))
+	rows, err := r.pool.Query(ctx, query, args...)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	result := make(map[uuid.UUID]*restaurant.MenuItem)
+	for rows.Next() {
+		var it restaurant.MenuItem
+		var priceMinor int64
+		var curr string
+		if scanErr := rows.Scan(&it.ID, &it.RestaurantID, &it.CategoryID, &it.Name, &it.Description, &priceMinor, &curr, &it.IsAvailable, &it.HSNSACCode, &it.CGSTRateBps, &it.SGSTRateBps, &it.CreatedAt, &it.UpdatedAt); scanErr == nil {
+			it.Price = money.New(priceMinor)
+			result[it.ID] = &it
+		}
+	}
+	// Attach variants for all fetched items in one query
+	if len(result) > 0 {
+		fetchedIDs := make([]uuid.UUID, 0, len(result))
+		for id := range result {
+			fetchedIDs = append(fetchedIDs, id)
+		}
+		if vm, verr := r.ListVariantsByMenuItemIDs(ctx, fetchedIDs); verr == nil {
+			for id, item := range result {
+				item.Variants = vm[id]
+			}
+		}
+	}
+	return result, nil
+}
+
 func (r *PostgresRepository) ListMenuItems(ctx context.Context, restaurantID uuid.UUID) ([]restaurant.MenuItem, error) {
 	if r.pool != nil {
 		rows, err := r.pool.Query(ctx, `
@@ -1714,6 +2168,50 @@ func (r *PostgresRepository) GetMenuItemVariantByID(ctx context.Context, id uuid
 		}
 	}
 	return r.mem.GetMenuItemVariantByID(ctx, id)
+}
+
+func (r *PostgresRepository) GetMenuItemVariantsByIDs(ctx context.Context, ids []uuid.UUID) (map[uuid.UUID]*restaurant.MenuItemVariant, error) {
+	if len(ids) == 0 {
+		return map[uuid.UUID]*restaurant.MenuItemVariant{}, nil
+	}
+	if r.pool == nil {
+		result := make(map[uuid.UUID]*restaurant.MenuItemVariant)
+		for _, id := range ids {
+			v, err := r.mem.GetMenuItemVariantByID(ctx, id)
+			if err == nil {
+				result[id] = v
+			}
+		}
+		return result, nil
+	}
+	args := make([]any, len(ids))
+	for i, id := range ids {
+		args[i] = id
+	}
+	placeholders := make([]string, len(ids))
+	for i := range ids {
+		placeholders[i] = fmt.Sprintf("$%d", i+1)
+	}
+	query := fmt.Sprintf(`
+		SELECT id, menu_item_id, name, price_minor, is_available, display_order, created_at, updated_at
+		FROM menu_item_variants
+		WHERE id IN (%s);
+	`, strings.Join(placeholders, ","))
+	rows, err := r.pool.Query(ctx, query, args...)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	result := make(map[uuid.UUID]*restaurant.MenuItemVariant)
+	for rows.Next() {
+		var v restaurant.MenuItemVariant
+		var priceMinor int64
+		if scanErr := rows.Scan(&v.ID, &v.MenuItemID, &v.Name, &priceMinor, &v.IsAvailable, &v.DisplayOrder, &v.CreatedAt, &v.UpdatedAt); scanErr == nil {
+			v.Price = money.New(priceMinor)
+			result[v.ID] = &v
+		}
+	}
+	return result, nil
 }
 
 func (r *PostgresRepository) GetSettings(ctx context.Context, restaurantID uuid.UUID) (*restaurant.RestaurantSettings, error) {
@@ -2151,6 +2649,98 @@ func (r *PostgresRepository) CreateInventoryLog(ctx context.Context, log *invent
 		return tx.Commit(ctx)
 	}
 	return nil
+}
+
+// CreateInventoryLogs inserts multiple inventory logs and applies stock changes in ONE transaction,
+// instead of N transactions for N ingredients (order consumption / restoration paths).
+func (r *PostgresRepository) CreateInventoryLogs(ctx context.Context, logs []*inventory.InventoryLog) error {
+	for _, l := range logs {
+		_ = r.mem.CreateInventoryLog(ctx, l)
+	}
+	if r.pool == nil || len(logs) == 0 {
+		return nil
+	}
+
+	tx, err := r.pool.Begin(ctx)
+	if err != nil {
+		return err
+	}
+	defer tx.Rollback(ctx)
+
+	// Batch insert all logs with a single multi-row INSERT
+	valueStrings := make([]string, 0, len(logs))
+	args := make([]any, 0, len(logs)*11)
+	for i, log := range logs {
+		if log.ID == uuid.Nil {
+			log.ID = uuid.New()
+		}
+		if log.LoggedAt.IsZero() {
+			log.LoggedAt = time.Now().UTC()
+		}
+		base := i * 11
+		valueStrings = append(valueStrings, fmt.Sprintf(
+			"($%d,$%d,$%d,$%d,$%d,$%d,$%d,$%d,$%d,$%d,$%d)",
+			base+1, base+2, base+3, base+4, base+5, base+6, base+7, base+8, base+9, base+10, base+11,
+		))
+		args = append(args,
+			log.ID, log.RestaurantID, log.InventoryItemID, string(log.ChangeType), log.Quantity,
+			log.UnitCost.AmountMinorUnits, log.TotalCost.AmountMinorUnits, log.Reference,
+			log.ExpenseID, log.OrderID, log.LoggedAt,
+		)
+	}
+	_, err = tx.Exec(ctx, `
+		INSERT INTO inventory_logs (
+			id, restaurant_id, inventory_item_id, change_type, quantity, unit_cost_minor, total_cost_minor, reference, expense_id, order_id, logged_at
+		) VALUES `+strings.Join(valueStrings, ","), args...)
+	if err != nil {
+		return err
+	}
+
+	// Apply stock deltas — aggregate per item within this batch to one UPDATE per unique item
+	type delta struct {
+		itemID       uuid.UUID
+		restaurantID uuid.UUID
+		qty          float64
+		isAdjust     bool
+		unitCost     int64
+	}
+	deltas := make(map[uuid.UUID]*delta)
+	order := make([]uuid.UUID, 0, len(logs))
+	for _, log := range logs {
+		d, ok := deltas[log.InventoryItemID]
+		if !ok {
+			d = &delta{itemID: log.InventoryItemID, restaurantID: log.RestaurantID}
+			deltas[log.InventoryItemID] = d
+			order = append(order, log.InventoryItemID)
+		}
+		switch log.ChangeType {
+		case inventory.ChangeStockIn:
+			d.qty += log.Quantity
+			if log.UnitCost.AmountMinorUnits > 0 {
+				d.unitCost = log.UnitCost.AmountMinorUnits
+			}
+		case inventory.ChangeWastage, inventory.ChangeOrderConsumption:
+			d.qty -= log.Quantity
+		case inventory.ChangeAdjustment:
+			d.isAdjust = true
+			d.qty = log.Quantity // last adjustment wins
+		}
+	}
+	for _, itemID := range order {
+		d := deltas[itemID]
+		var uerr error
+		if d.isAdjust {
+			_, uerr = tx.Exec(ctx, `UPDATE inventory_items SET current_stock = $1, updated_at = NOW() WHERE id = $2 AND restaurant_id = $3`, d.qty, d.itemID, d.restaurantID)
+		} else if d.unitCost > 0 {
+			_, uerr = tx.Exec(ctx, `UPDATE inventory_items SET current_stock = current_stock + $1, unit_cost_minor = $2, updated_at = NOW() WHERE id = $3 AND restaurant_id = $4`, d.qty, d.unitCost, d.itemID, d.restaurantID)
+		} else {
+			_, uerr = tx.Exec(ctx, `UPDATE inventory_items SET current_stock = current_stock + $1, updated_at = NOW() WHERE id = $2 AND restaurant_id = $3`, d.qty, d.itemID, d.restaurantID)
+		}
+		if uerr != nil {
+			return uerr
+		}
+	}
+	return tx.Commit(ctx)
 }
 
 func (r *PostgresRepository) ListInventoryLogs(ctx context.Context, restaurantID uuid.UUID, itemID *uuid.UUID, limit int) ([]inventory.InventoryLog, error) {

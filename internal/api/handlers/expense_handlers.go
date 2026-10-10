@@ -4,6 +4,7 @@ import (
 	"encoding/json"
 	"net/http"
 	"strconv"
+	"sync"
 	"time"
 
 	"github.com/devrishijain/table-manager/internal/api/middleware"
@@ -144,12 +145,23 @@ func (h *APIHandler) ListExpenses(w http.ResponseWriter, r *http.Request) {
 				rests = []restaurant.Restaurant{{ID: claims.RestaurantID}}
 			}
 		}
+		// Fetch expenses for all restaurants in parallel instead of sequentially
+		results := make([][]expense.Expense, len(rests))
+		var wg sync.WaitGroup
+		wg.Add(len(rests))
+		for i, rest := range rests {
+			go func(idx int, rid uuid.UUID) {
+				defer wg.Done()
+				eList, eErr := h.getExpenseService().ListExpenses(r.Context(), rid, expType, cat, startDate, endDate)
+				if eErr == nil && len(eList) > 0 {
+					results[idx] = eList
+				}
+			}(i, rest.ID)
+		}
+		wg.Wait()
 		expenses = make([]expense.Expense, 0)
-		for _, rest := range rests {
-			eList, eErr := h.getExpenseService().ListExpenses(r.Context(), rest.ID, expType, cat, startDate, endDate)
-			if eErr == nil && len(eList) > 0 {
-				expenses = append(expenses, eList...)
-			}
+		for _, eList := range results {
+			expenses = append(expenses, eList...)
 		}
 	} else {
 		expenses, err = h.getExpenseService().ListExpenses(r.Context(), restaurantID, expType, cat, startDate, endDate)
