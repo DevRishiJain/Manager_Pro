@@ -143,6 +143,9 @@ type Repository interface {
 	GetMenuItemVariantByID(ctx context.Context, id uuid.UUID) (*restaurant.MenuItemVariant, error)
 	GetMenuItemVariantsByIDs(ctx context.Context, ids []uuid.UUID) (map[uuid.UUID]*restaurant.MenuItemVariant, error)
 
+	// Quick Billing atomic transaction
+	CreateQuickBillingTransaction(ctx context.Context, s *session.DiningSession, o *order.Order, items []order.OrderItem, p *payment.Payment) error
+
 	GetSettings(ctx context.Context, restaurantID uuid.UUID) (*restaurant.RestaurantSettings, error)
 	UpdateSettings(ctx context.Context, s *restaurant.RestaurantSettings) error
 

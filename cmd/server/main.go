@@ -182,6 +182,8 @@ func main() {
 	go outboxDispatcher.Start(ctx)
 	defer outboxDispatcher.Stop()
 
+	apiHandler.SetOutboxDispatcher(outboxDispatcher)
+
 	orderSvc.SetOutboxDispatcher(outboxDispatcher)
 	sessionSvc.SetOutboxDispatcher(outboxDispatcher)
 	paymentSvc.SetOutboxDispatcher(outboxDispatcher)

@@ -1370,6 +1370,19 @@ func (m *MemoryRepository) GetMenuItemsByIDs(ctx context.Context, ids []uuid.UUI
 	return result, nil
 }
 
+func (m *MemoryRepository) CreateQuickBillingTransaction(ctx context.Context, s *session.DiningSession, o *order.Order, items []order.OrderItem, p *payment.Payment) error {
+	if err := m.CreateSession(ctx, s); err != nil {
+		return err
+	}
+	if err := m.CreateOrder(ctx, o, items); err != nil {
+		return err
+	}
+	if err := m.CreatePayment(ctx, p); err != nil {
+		return err
+	}
+	return nil
+}
+
 func (m *MemoryRepository) ListMenuItems(ctx context.Context, restaurantID uuid.UUID) ([]restaurant.MenuItem, error) {
 	m.mu.RLock()
 	defer m.mu.RUnlock()

@@ -116,6 +116,7 @@ func NewRouter(handler *handlers.APIHandler, repo storage.Repository, jwtSecret 
 			sr.Get("/restaurant/subscription", handler.GetSubscription)
 			sr.Post("/restaurant/subscription/renew", handler.RenewSubscription)
 			sr.Post("/staff/sessions/{id}/assign-waiter", handler.AssignWaiter)
+			sr.Post("/staff/billing/quick", handler.StaffQuickBilling)
 		})
 
 		// Franchise Governance routes

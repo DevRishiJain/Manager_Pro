@@ -370,6 +370,11 @@ func (tr *TrackedRepository) GetMenuItemsByIDs(ctx context.Context, ids []uuid.U
 	return tr.underlying.GetMenuItemsByIDs(ctx, ids)
 }
 
+func (tr *TrackedRepository) CreateQuickBillingTransaction(ctx context.Context, s *session.DiningSession, o *order.Order, items []order.OrderItem, p *payment.Payment) error {
+	RecordQuery(ctx)
+	return tr.underlying.CreateQuickBillingTransaction(ctx, s, o, items, p)
+}
+
 func (tr *TrackedRepository) ListMenuItems(ctx context.Context, restaurantID uuid.UUID) ([]restaurant.MenuItem, error) {
 	RecordQuery(ctx)
 	return tr.underlying.ListMenuItems(ctx, restaurantID)

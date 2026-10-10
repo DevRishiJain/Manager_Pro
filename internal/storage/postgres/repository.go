@@ -2022,59 +2022,173 @@ func (r *PostgresRepository) GetMenuItemByID(ctx context.Context, id uuid.UUID) 
 
 func (r *PostgresRepository) GetMenuItemsByIDs(ctx context.Context, ids []uuid.UUID) (map[uuid.UUID]*restaurant.MenuItem, error) {
 	if len(ids) == 0 {
-		return map[uuid.UUID]*restaurant.MenuItem{}, nil
+		return make(map[uuid.UUID]*restaurant.MenuItem), nil
 	}
+	res := make(map[uuid.UUID]*restaurant.MenuItem, len(ids))
+	if r.pool != nil {
+		rows, err := r.pool.Query(ctx, `
+			SELECT id, restaurant_id, category_id, name, description, price_minor, currency, is_available, hsn_sac_code, cgst_rate_bps, sgst_rate_bps, created_at, updated_at
+			FROM menu_items
+			WHERE id = ANY($1);
+		`, ids)
+		if err == nil {
+			defer rows.Close()
+			for rows.Next() {
+				var it restaurant.MenuItem
+				var priceMinor int64
+				var curr string
+				if err := rows.Scan(&it.ID, &it.RestaurantID, &it.CategoryID, &it.Name, &it.Description, &priceMinor, &curr, &it.IsAvailable, &it.HSNSACCode, &it.CGSTRateBps, &it.SGSTRateBps, &it.CreatedAt, &it.UpdatedAt); err == nil {
+					it.Price = money.New(priceMinor)
+					res[it.ID] = &it
+				}
+			}
+			if vm, verr := r.ListVariantsByMenuItemIDs(ctx, ids); verr == nil {
+				for itemID, variants := range vm {
+					if it, ok := res[itemID]; ok {
+						it.Variants = variants
+					}
+				}
+			}
+			return res, nil
+		}
+	}
+	return r.mem.GetMenuItemsByIDs(ctx, ids)
+}
+
+func (r *PostgresRepository) CreateQuickBillingTransaction(
+	ctx context.Context,
+	s *session.DiningSession,
+	o *order.Order,
+	items []order.OrderItem,
+	p *payment.Payment,
+) error {
+	_ = r.mem.CreateSession(ctx, s)
+	_ = r.mem.CreateOrder(ctx, o, items)
+	_ = r.mem.CreatePayment(ctx, p)
+
 	if r.pool == nil {
-		result := make(map[uuid.UUID]*restaurant.MenuItem)
-		for _, id := range ids {
-			it, err := r.mem.GetMenuItemByID(ctx, id)
-			if err == nil {
-				result[id] = it
-			}
-		}
-		return result, nil
+		return nil
 	}
-	args := make([]any, len(ids))
-	for i, id := range ids {
-		args[i] = id
-	}
-	placeholders := make([]string, len(ids))
-	for i := range ids {
-		placeholders[i] = fmt.Sprintf("$%d", i+1)
-	}
-	query := fmt.Sprintf(`
-		SELECT id, restaurant_id, category_id, name, description, price_minor, currency, is_available, hsn_sac_code, cgst_rate_bps, sgst_rate_bps, created_at, updated_at
-		FROM menu_items
-		WHERE id IN (%s);
-	`, strings.Join(placeholders, ","))
-	rows, err := r.pool.Query(ctx, query, args...)
+
+	tx, err := r.pool.Begin(ctx)
 	if err != nil {
-		return nil, err
+		return err
 	}
-	defer rows.Close()
-	result := make(map[uuid.UUID]*restaurant.MenuItem)
-	for rows.Next() {
-		var it restaurant.MenuItem
-		var priceMinor int64
-		var curr string
-		if scanErr := rows.Scan(&it.ID, &it.RestaurantID, &it.CategoryID, &it.Name, &it.Description, &priceMinor, &curr, &it.IsAvailable, &it.HSNSACCode, &it.CGSTRateBps, &it.SGSTRateBps, &it.CreatedAt, &it.UpdatedAt); scanErr == nil {
-			it.Price = money.New(priceMinor)
-			result[it.ID] = &it
+	defer tx.Rollback(ctx)
+
+	// 1. Insert Session (finalized state)
+	curr := s.RunningTotal.Currency
+	if curr == "" {
+		curr = "INR"
+	}
+	openedAt := s.OpenedAt
+	if openedAt.IsZero() {
+		openedAt = time.Now().UTC()
+	}
+	lastAct := s.LastActivityAt
+	if lastAct.IsZero() {
+		lastAct = openedAt
+	}
+	expiry := s.ExpiryDeadline
+	if expiry.IsZero() {
+		expiry = openedAt.Add(3 * time.Hour)
+	}
+
+	_, err = tx.Exec(ctx, `
+		INSERT INTO dining_sessions (
+			id, restaurant_id, table_id, status, opened_at, running_total_minor, final_total_minor, platform_fee_minor, 
+			currency, session_token, device_fingerprint, last_activity_at, expiry_deadline, version, created_at, updated_at,
+			customer_name, customer_phone, guest_count, assistance_reason, assistance_requested_at, assigned_waiter_id, assigned_waiter_name
+		)
+		VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, $17, $18, $19, $20, $21, $22, $23)
+		ON CONFLICT (id) DO UPDATE SET
+			status = EXCLUDED.status,
+			running_total_minor = EXCLUDED.running_total_minor,
+			final_total_minor = EXCLUDED.final_total_minor,
+			updated_at = EXCLUDED.updated_at;
+	`, s.ID, s.RestaurantID, s.TableID, string(s.Status), openedAt, s.RunningTotal.AmountMinorUnits, s.FinalTotal.AmountMinorUnits, s.PlatformFeeAmount.AmountMinorUnits, curr, s.SessionToken, s.DeviceFingerprint, lastAct, expiry, s.Version, s.CreatedAt, s.UpdatedAt, s.CustomerName, s.CustomerPhone, s.GuestCount, s.AssistanceReason, s.AssistanceRequestedAt, s.AssignedWaiterID, s.AssignedWaiterName)
+	if err != nil {
+		return fmt.Errorf("failed to insert session: %w", err)
+	}
+
+	// 2. Insert Order (ACCEPTED)
+	placedAt := o.PlacedAt
+	if placedAt.IsZero() {
+		placedAt = time.Now().UTC()
+	}
+	tableNum := o.TableNumber
+	if tableNum == "" {
+		tableNum = "Table"
+	}
+
+	type compactItem struct {
+		ID                  uuid.UUID `json:"id"`
+		MenuItemID          uuid.UUID `json:"menu_item_id"`
+		ItemNameSnapshot    string    `json:"item_name_snapshot"`
+		Quantity            int       `json:"quantity"`
+		UnitPriceMinor      int64     `json:"unit_price_minor"`
+		LineTotalMinor      int64     `json:"line_total_minor"`
+		SpecialInstructions string    `json:"special_instructions,omitempty"`
+	}
+	compactItems := make([]compactItem, len(items))
+	for i, it := range items {
+		compactItems[i] = compactItem{
+			ID:                  it.ID,
+			MenuItemID:          it.MenuItemID,
+			ItemNameSnapshot:    it.ItemNameSnapshot,
+			Quantity:            it.Quantity,
+			UnitPriceMinor:      it.UnitPriceSnapshot.AmountMinorUnits,
+			LineTotalMinor:      it.LineTotal.AmountMinorUnits,
+			SpecialInstructions: it.SpecialInstructions,
 		}
 	}
-	// Attach variants for all fetched items in one query
-	if len(result) > 0 {
-		fetchedIDs := make([]uuid.UUID, 0, len(result))
-		for id := range result {
-			fetchedIDs = append(fetchedIDs, id)
+	summaryJSON, _ := json.Marshal(compactItems)
+
+	_, err = tx.Exec(ctx, `
+		INSERT INTO orders (
+			id, session_id, restaurant_id, sequence_number, status, placed_at, accepted_at, accepted_by_staff_id,
+			subtotal_minor, tax_total_minor, total_minor, currency, 
+			cancellation_fee_applicable, version, created_at, updated_at,
+			table_number, items_summary
+		)
+		VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, $17, $18)
+		ON CONFLICT (id) DO NOTHING;
+	`, o.ID, o.SessionID, o.RestaurantID, o.SequenceNumber, string(o.Status), placedAt, o.AcceptedAt, o.AcceptedByStaffID, o.Subtotal.AmountMinorUnits, o.TaxTotal.AmountMinorUnits, o.Total.AmountMinorUnits, curr, o.CancellationFeeApplicable, o.Version, o.CreatedAt, o.UpdatedAt, tableNum, summaryJSON)
+	if err != nil {
+		return fmt.Errorf("failed to insert order: %w", err)
+	}
+
+	// 3. Insert Order Items
+	for _, it := range items {
+		itemCurr := it.LineTotal.Currency
+		if itemCurr == "" {
+			itemCurr = curr
 		}
-		if vm, verr := r.ListVariantsByMenuItemIDs(ctx, fetchedIDs); verr == nil {
-			for id, item := range result {
-				item.Variants = vm[id]
-			}
+		hsn := it.HSNSACCodeSnapshot
+		if hsn == "" {
+			hsn = "996331"
+		}
+		_, err = tx.Exec(ctx, `
+			INSERT INTO order_items (id, order_id, menu_item_id, variant_id, item_name_snapshot, quantity, unit_price_minor, line_total_minor, currency, hsn_sac_code_snapshot, cgst_rate_bps_snapshot, sgst_rate_bps_snapshot, cgst_amount_minor, sgst_amount_minor, special_instructions, created_at)
+			VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16)
+			ON CONFLICT (id) DO NOTHING;
+		`, it.ID, it.OrderID, it.MenuItemID, it.VariantID, it.ItemNameSnapshot, it.Quantity, it.UnitPriceSnapshot.AmountMinorUnits, it.LineTotal.AmountMinorUnits, itemCurr, hsn, it.CGSTRateBpsSnapshot, it.SGSTRateBpsSnapshot, it.CGSTAmount.AmountMinorUnits, it.SGSTAmount.AmountMinorUnits, it.SpecialInstructions, it.CreatedAt)
+		if err != nil {
+			return fmt.Errorf("failed to insert order item: %w", err)
 		}
 	}
-	return result, nil
+
+	// 4. Insert Payment (CONFIRMED)
+	_, err = tx.Exec(ctx, `
+		INSERT INTO payments (id, session_id, restaurant_id, method, amount_minor, currency, status, version, created_at, updated_at)
+		VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10)
+		ON CONFLICT (id) DO NOTHING;
+	`, p.ID, p.SessionID, p.RestaurantID, string(p.Method), p.Amount.AmountMinorUnits, p.Amount.Currency, p.Status, p.Version, p.CreatedAt, p.UpdatedAt)
+	if err != nil {
+		return fmt.Errorf("failed to insert payment: %w", err)
+	}
+
+	return tx.Commit(ctx)
 }
 
 func (r *PostgresRepository) ListMenuItems(ctx context.Context, restaurantID uuid.UUID) ([]restaurant.MenuItem, error) {

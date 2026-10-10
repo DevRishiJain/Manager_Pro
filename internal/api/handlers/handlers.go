@@ -50,6 +50,7 @@ type APIHandler struct {
 	webhookSecret     string
 	jwtSecret         []byte
 	wsTicketManager   *ws.TicketManager
+	outboxDispatcher  *ws.OutboxDispatcher
 }
 
 func (h *APIHandler) SetJWTSecret(secret []byte) {
@@ -69,6 +70,10 @@ func (h *APIHandler) SetWSTicketManager(tm *ws.TicketManager) {
 
 func (h *APIHandler) GetWSTicketManager() *ws.TicketManager {
 	return h.wsTicketManager
+}
+
+func (h *APIHandler) SetOutboxDispatcher(d *ws.OutboxDispatcher) {
+	h.outboxDispatcher = d
 }
 
 func (h *APIHandler) SetAICatalogService(aiSvc *service.AICatalogService) {
@@ -4348,3 +4353,489 @@ func (h *APIHandler) GetWSTicket(w http.ResponseWriter, r *http.Request) {
 
 	errorResponse(w, http.StatusUnauthorized, "invalid authorization or session credentials")
 }
+
+// --- Quick Billing (Unified POS atomic checkout) ---
+
+type QuickBillingItemRequest struct {
+	MenuItemID          uuid.UUID  `json:"menu_item_id"`
+	VariantID           *uuid.UUID `json:"variant_id,omitempty"`
+	Quantity            int        `json:"quantity"`
+	Instructions        string     `json:"instructions,omitempty"`
+	SpecialInstructions string     `json:"special_instructions,omitempty"`
+}
+
+type QuickBillingPaymentRequest struct {
+	Method        string `json:"method"` // CASH, UPI, CARD
+	AmountMinor   int64  `json:"amount_minor"`
+	TenderedMinor int64  `json:"tendered_minor,omitempty"`
+	ChangeMinor   int64  `json:"change_minor,omitempty"`
+}
+
+type QuickBillingRequest struct {
+	OrderType     string                     `json:"order_type"` // TAKEAWAY or DINE_IN
+	TableID       string                     `json:"table_id,omitempty"`
+	TableNumber   string                     `json:"table_number,omitempty"`
+	TableToken    string                     `json:"table_token,omitempty"`
+	CustomerName  string                     `json:"customer_name,omitempty"`
+	CustomerPhone string                     `json:"customer_phone,omitempty"`
+	SendToKitchen *bool                      `json:"send_to_kitchen,omitempty"`
+	Items         []QuickBillingItemRequest  `json:"items"`
+	Payment       QuickBillingPaymentRequest `json:"payment"`
+}
+
+type QuickBillingItemResponse struct {
+	MenuItemID     string `json:"menu_item_id"`
+	Name           string `json:"name"`
+	VariantName    string `json:"variant_name,omitempty"`
+	Quantity       int    `json:"quantity"`
+	UnitPriceMinor int64  `json:"unit_price_minor"`
+	TotalMinor     int64  `json:"total_minor"`
+	Notes          string `json:"notes,omitempty"`
+}
+
+type QuickBillingResponse struct {
+	Success         bool                       `json:"success"`
+	SessionID       string                     `json:"session_id"`
+	OrderID         string                     `json:"order_id"`
+	OrderNumber     string                     `json:"order_number"`
+	InvoiceNumber   string                     `json:"invoice_number"`
+	CreatedAt       string                     `json:"created_at"`
+	OrderType       string                     `json:"order_type"`
+	TableNumber     string                     `json:"table_number,omitempty"`
+	CustomerName    string                     `json:"customer_name,omitempty"`
+	CustomerPhone   string                     `json:"customer_phone,omitempty"`
+	CashierName     string                     `json:"cashier_name,omitempty"`
+	SubtotalMinor   int64                      `json:"subtotal_minor"`
+	CGSTMinor       int64                      `json:"cgst_minor"`
+	SGSTMinor       int64                      `json:"sgst_minor"`
+	GrandTotalMinor int64                      `json:"grand_total_minor"`
+	TenderedMinor   int64                      `json:"tendered_minor,omitempty"`
+	ChangeMinor     int64                      `json:"change_minor,omitempty"`
+	PaymentMethod   string                     `json:"payment_method"`
+	Items           []QuickBillingItemResponse `json:"items"`
+}
+
+func (h *APIHandler) StaffQuickBilling(w http.ResponseWriter, r *http.Request) {
+	claims, ok := middleware.GetStaffClaimsFromContext(r.Context())
+	if !ok {
+		errorResponse(w, http.StatusUnauthorized, "unauthorized staff")
+		return
+	}
+
+	var req QuickBillingRequest
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		errorResponse(w, http.StatusBadRequest, "invalid request payload: "+err.Error())
+		return
+	}
+
+	if len(req.Items) == 0 {
+		errorResponse(w, http.StatusBadRequest, "order must contain at least one item")
+		return
+	}
+
+	orderType := strings.ToUpper(strings.TrimSpace(req.OrderType))
+	if orderType == "" {
+		orderType = "TAKEAWAY"
+	}
+
+	// 1. Resolve Dining Table (Takeaway orders must never block dining room tables)
+	var targetTable *restaurant.Table
+	if orderType == "TAKEAWAY" {
+		tables, _ := h.repo.ListTables(r.Context(), claims.RestaurantID)
+		for _, t := range tables {
+			cleanT := strings.ToLower(strings.TrimSpace(t.TableNumber))
+			if cleanT == "takeaway" || cleanT == "counter" || strings.Contains(cleanT, "takeaway") {
+				targetTable = &t
+				break
+			}
+		}
+		if targetTable == nil {
+			takeawayTbl := &restaurant.Table{
+				ID:           uuid.New(),
+				RestaurantID: claims.RestaurantID,
+				TableNumber:  "Takeaway",
+				TableToken:   fmt.Sprintf("TAKEAWAY-%s", uuid.New().String()[:8]),
+				Capacity:     0,
+				IsActive:     true,
+				CreatedAt:    time.Now().UTC(),
+				UpdatedAt:    time.Now().UTC(),
+			}
+			if err := h.repo.CreateTable(r.Context(), takeawayTbl); err == nil {
+				targetTable = takeawayTbl
+			} else if len(tables) > 0 {
+				targetTable = &tables[0]
+			}
+		}
+	} else {
+		// DINE-IN: strictly resolve specified dining table
+		if strings.TrimSpace(req.TableToken) != "" {
+			if t, err := h.repo.GetTableByToken(r.Context(), strings.TrimSpace(req.TableToken)); err == nil && t != nil {
+				targetTable = t
+			}
+		}
+		if targetTable == nil && strings.TrimSpace(req.TableID) != "" {
+			if parsed, err := uuid.Parse(strings.TrimSpace(req.TableID)); err == nil {
+				if t, err := h.repo.GetTableByID(r.Context(), parsed); err == nil && t != nil {
+					targetTable = t
+				}
+			}
+		}
+		if targetTable == nil && strings.TrimSpace(req.TableNumber) != "" {
+			tables, _ := h.repo.ListTables(r.Context(), claims.RestaurantID)
+			cleanReq := strings.TrimSpace(strings.ToLower(req.TableNumber))
+			cleanReqNum := strings.TrimPrefix(strings.TrimPrefix(cleanReq, "table "), "t")
+
+			for _, t := range tables {
+				cleanT := strings.TrimSpace(strings.ToLower(t.TableNumber))
+				cleanTNum := strings.TrimPrefix(strings.TrimPrefix(cleanT, "table "), "t")
+				if cleanT == cleanReq || (cleanReqNum != "" && cleanTNum == cleanReqNum) {
+					targetTable = &t
+					break
+				}
+			}
+		}
+		if targetTable == nil {
+			errorResponse(w, http.StatusBadRequest, "dining table is required for dine-in orders")
+			return
+		}
+	}
+
+	if targetTable == nil {
+		errorResponse(w, http.StatusBadRequest, "could not locate a dining table reference for this restaurant")
+		return
+	}
+
+	if targetTable.RestaurantID != claims.RestaurantID && !claims.IsPlatform {
+		errorResponse(w, http.StatusForbidden, "table belongs to another restaurant tenant")
+		return
+	}
+
+	customerName := strings.TrimSpace(req.CustomerName)
+	if customerName == "" {
+		if orderType == "TAKEAWAY" {
+			customerName = "Takeaway Guest"
+		} else {
+			customerName = "Walk-in Guest"
+		}
+	}
+
+	// 2. Batch Fetch Menu Items & Variants (Single Remote Query)
+	itemIDs := make([]uuid.UUID, len(req.Items))
+	for i, item := range req.Items {
+		itemIDs[i] = item.MenuItemID
+	}
+	menuItemMap, err := h.repo.GetMenuItemsByIDs(r.Context(), itemIDs)
+	if err != nil {
+		errorResponse(w, http.StatusInternalServerError, "failed to query menu items: "+err.Error())
+		return
+	}
+
+	orderID := uuid.New()
+	now := time.Now().UTC()
+	var subtotalMinor int64
+	var taxTotalMinor int64
+	orderItems := make([]order.OrderItem, len(req.Items))
+
+	for i, item := range req.Items {
+		menuItem, ok := menuItemMap[item.MenuItemID]
+		if !ok || menuItem == nil {
+			errorResponse(w, http.StatusBadRequest, fmt.Sprintf("item %s not found in menu catalog", item.MenuItemID))
+			return
+		}
+		if !menuItem.IsAvailable {
+			errorResponse(w, http.StatusBadRequest, fmt.Sprintf("item '%s' is currently out of stock", menuItem.Name))
+			return
+		}
+		if item.Quantity <= 0 {
+			errorResponse(w, http.StatusBadRequest, fmt.Sprintf("invalid quantity for item '%s'", menuItem.Name))
+			return
+		}
+
+		unitPrice := menuItem.Price
+		itemNameSnapshot := menuItem.Name
+
+		if item.VariantID != nil && *item.VariantID != uuid.Nil {
+			var matchedVariant *restaurant.MenuItemVariant
+			for _, v := range menuItem.Variants {
+				if v.ID == *item.VariantID {
+					matchedVariant = &v
+					break
+				}
+			}
+			if matchedVariant == nil || !matchedVariant.IsAvailable {
+				if v, verr := h.repo.GetMenuItemVariantByID(r.Context(), *item.VariantID); verr == nil && v != nil && v.IsAvailable {
+					matchedVariant = v
+				}
+			}
+			if matchedVariant != nil {
+				unitPrice = matchedVariant.Price
+				itemNameSnapshot = fmt.Sprintf("%s (%s)", menuItem.Name, matchedVariant.Name)
+			}
+		}
+
+		lineTotalMinor := unitPrice.AmountMinorUnits * int64(item.Quantity)
+		lineMoney := money.New(lineTotalMinor)
+
+		cgstMoney, _ := lineMoney.MultiplyFractionRoundHalfUp(menuItem.CGSTRateBps, 10000)
+		sgstMoney, _ := lineMoney.MultiplyFractionRoundHalfUp(menuItem.SGSTRateBps, 10000)
+
+		subtotalMinor += lineTotalMinor
+		taxTotalMinor += cgstMoney.AmountMinorUnits + sgstMoney.AmountMinorUnits
+
+		hsn := menuItem.HSNSACCode
+		if hsn == "" {
+			hsn = "996331"
+		}
+
+		notes := item.Instructions
+		if notes == "" {
+			notes = item.SpecialInstructions
+		}
+
+		orderItems[i] = order.OrderItem{
+			ID:                  uuid.New(),
+			OrderID:             orderID,
+			MenuItemID:          menuItem.ID,
+			VariantID:           item.VariantID,
+			ItemNameSnapshot:    itemNameSnapshot,
+			Quantity:            item.Quantity,
+			UnitPriceSnapshot:   unitPrice,
+			LineTotal:           lineMoney,
+			HSNSACCodeSnapshot:  hsn,
+			CGSTRateBpsSnapshot: menuItem.CGSTRateBps,
+			SGSTRateBpsSnapshot: menuItem.SGSTRateBps,
+			CGSTAmount:          cgstMoney,
+			SGSTAmount:          sgstMoney,
+			SpecialInstructions: notes,
+			CreatedAt:           now,
+		}
+	}
+
+	totalMoney := money.New(subtotalMinor + taxTotalMinor)
+
+	// 3. Payment Method & Amounts
+	var paymentMethod payment.Method
+	switch strings.ToUpper(strings.TrimSpace(req.Payment.Method)) {
+	case "CASH":
+		paymentMethod = payment.MethodCash
+	case "UPI", "UPI_QR":
+		paymentMethod = payment.MethodUPIQR
+	case "CARD", "POS_CARD", "CREDIT_CARD", "DEBIT_CARD":
+		paymentMethod = payment.MethodPosCard
+	default:
+		paymentMethod = payment.MethodCash
+	}
+
+	amountToPay := req.Payment.AmountMinor
+	if amountToPay <= 0 {
+		amountToPay = totalMoney.AmountMinorUnits
+	}
+
+	// 4. Build Atomic Domain Entities
+	sessID := uuid.New()
+	sessionToken, _ := crypto.GenerateRandomToken(32)
+	sessionStatus := session.StatePaid
+	closeReason := session.CloseReasonPaid
+	if orderType == "TAKEAWAY" {
+		sessionStatus = session.StateCompleted
+	}
+
+	sess := &session.DiningSession{
+		ID:                 sessID,
+		RestaurantID:       claims.RestaurantID,
+		TableID:            targetTable.ID,
+		Status:             sessionStatus,
+		OpenedAt:           now,
+		RunningTotal:       totalMoney,
+		FinalTotal:         totalMoney,
+		PlatformFeeAmount:  money.Zero("INR"),
+		SessionToken:       sessionToken,
+		DeviceFingerprint:  "STAFF_POS_" + claims.StaffID.String(),
+		LastActivityAt:     now,
+		ExpiryDeadline:     now.Add(3 * time.Hour),
+		Version:            1,
+		CreatedAt:          now,
+		UpdatedAt:          now,
+		CustomerName:       customerName,
+		CustomerPhone:      strings.TrimSpace(req.CustomerPhone),
+		GuestCount:         1,
+		VerifiedAt:         &now,
+		VerifiedByStaffID:  &claims.StaffID,
+		AssignedWaiterID:   &claims.StaffID,
+		AssignedWaiterName: claims.Name,
+		CloseReason:        &closeReason,
+	}
+
+	tableNumToRecord := targetTable.TableNumber
+	if orderType == "TAKEAWAY" {
+		tableNumToRecord = "Takeaway"
+	}
+
+	shouldSendKitchen := false
+	if req.SendToKitchen != nil {
+		shouldSendKitchen = *req.SendToKitchen
+	} else if orderType == "DINE_IN" {
+		shouldSendKitchen = true
+	}
+
+	orderStatus := order.StateAccepted
+	if !shouldSendKitchen {
+		orderStatus = order.StateCompleted
+	}
+
+	ord := &order.Order{
+		ID:                orderID,
+		SessionID:         sessID,
+		RestaurantID:      claims.RestaurantID,
+		SequenceNumber:    1,
+		TableNumber:       tableNumToRecord,
+		CustomerName:      customerName,
+		CustomerPhone:     sess.CustomerPhone,
+		GuestCount:        1,
+		Status:            orderStatus,
+		PlacedAt:          now,
+		AcceptedAt:        &now,
+		AcceptedByStaffID: &claims.StaffID,
+		Subtotal:          money.New(subtotalMinor),
+		TaxTotal:          money.New(taxTotalMinor),
+		Total:             totalMoney,
+		Items:             orderItems,
+		Version:           1,
+		CreatedAt:         now,
+		UpdatedAt:         now,
+	}
+
+	pay := &payment.Payment{
+		ID:                 uuid.New(),
+		SessionID:          sessID,
+		RestaurantID:       claims.RestaurantID,
+		Method:             paymentMethod,
+		Amount:             money.New(amountToPay),
+		Status:             payment.StateConfirmed,
+		ConfirmedByStaffID: &claims.StaffID,
+		Version:            1,
+		CreatedAt:          now,
+		UpdatedAt:          now,
+	}
+
+	// 5. Execute Single Consolidated Database Transaction
+	if err := h.repo.CreateQuickBillingTransaction(r.Context(), sess, ord, orderItems, pay); err != nil {
+		errorResponse(w, http.StatusInternalServerError, "failed to persist quick billing transaction: "+err.Error())
+		return
+	}
+
+	// 6. Asynchronous Background Dispatches (Non-blocking Outbox, Audits & WebSockets)
+	go func(s *session.DiningSession, o *order.Order, p *payment.Payment) {
+		bgCtx, cancel := context.WithTimeout(context.Background(), 15*time.Second)
+		defer cancel()
+
+		payBytes, _ := json.Marshal(p)
+		auditLogID := uuid.New()
+		_ = h.repo.AppendAuditLog(bgCtx, &audit.AuditLog{
+			ID:           auditLogID,
+			ActorType:    audit.ActorTypeStaff,
+			ActorID:      claims.StaffID.String(),
+			RestaurantID: claims.RestaurantID,
+			SessionID:    &s.ID,
+			Action:       fmt.Sprintf("PAYMENT_CONFIRMED_%s", p.Method),
+			AfterState:   payBytes,
+			CreatedAt:    now,
+		})
+		_ = h.repo.AppendStaffAction(bgCtx, &audit.StaffAction{
+			ID:           uuid.New(),
+			AuditLogID:   auditLogID,
+			StaffID:      claims.StaffID,
+			RestaurantID: claims.RestaurantID,
+			SessionID:    &s.ID,
+			ActionType:   "PAYMENT_CONFIRM",
+			Reason:       string(p.Method),
+			CreatedAt:    now,
+		})
+
+		if h.ledgerService != nil {
+			_, _ = h.ledgerService.ComputeSessionPlatformFee(bgCtx, s)
+		}
+		if h.exitService != nil {
+			_, _, _ = h.exitService.IssueExitPass(bgCtx, s.ID)
+		}
+
+		rooms := []string{
+			fmt.Sprintf("session:%s", s.ID.String()),
+			fmt.Sprintf("restaurant:%s:dashboard", s.RestaurantID.String()),
+		}
+		if orderType == "DINE_IN" {
+			rooms = append(rooms, fmt.Sprintf("restaurant:%s:floor", s.RestaurantID.String()))
+		}
+		shouldSendKitchen := false
+		if req.SendToKitchen != nil {
+			shouldSendKitchen = *req.SendToKitchen
+		} else if orderType == "DINE_IN" {
+			shouldSendKitchen = true
+		}
+		if shouldSendKitchen {
+			rooms = append(rooms, fmt.Sprintf("restaurant:%s:kitchen", s.RestaurantID.String()))
+		}
+		_, _ = ws.PublishEventToRooms(bgCtx, h.repo, h.outboxDispatcher, s.RestaurantID, "ORDER_PLACED", rooms, o.ID.String(), o)
+		if shouldSendKitchen {
+			_, _ = ws.PublishEventToRooms(bgCtx, h.repo, h.outboxDispatcher, s.RestaurantID, "ORDER_ACCEPTED", rooms, o.ID.String(), o)
+		} else {
+			_, _ = ws.PublishEventToRooms(bgCtx, h.repo, h.outboxDispatcher, s.RestaurantID, "ORDER_COMPLETED", rooms, o.ID.String(), o)
+		}
+		_, _ = ws.PublishEventToRooms(bgCtx, h.repo, h.outboxDispatcher, s.RestaurantID, "PAYMENT_CONFIRMED", rooms, p.ID.String(), p)
+	}(sess, ord, pay)
+
+	// 7. Format Immediate Response (Under 1s)
+	orderNum := fmt.Sprintf("ORD-%s", ord.ID.String()[:8])
+	invoiceNum := fmt.Sprintf("INV-%s", ord.ID.String()[:8])
+
+	cgstMinor := int64(0)
+	sgstMinor := int64(0)
+	respItems := make([]QuickBillingItemResponse, len(ord.Items))
+	for i, itm := range ord.Items {
+		cgstMinor += itm.CGSTAmount.AmountMinorUnits
+		sgstMinor += itm.SGSTAmount.AmountMinorUnits
+		respItems[i] = QuickBillingItemResponse{
+			MenuItemID:     itm.MenuItemID.String(),
+			Name:           itm.ItemNameSnapshot,
+			Quantity:       itm.Quantity,
+			UnitPriceMinor: itm.UnitPriceSnapshot.AmountMinorUnits,
+			TotalMinor:     itm.LineTotal.AmountMinorUnits,
+			Notes:          itm.SpecialInstructions,
+		}
+	}
+	if cgstMinor == 0 && sgstMinor == 0 && ord.TaxTotal.AmountMinorUnits > 0 {
+		cgstMinor = ord.TaxTotal.AmountMinorUnits / 2
+		sgstMinor = ord.TaxTotal.AmountMinorUnits - cgstMinor
+	}
+
+	cashierName := claims.Name
+	if cashierName == "" {
+		cashierName = "Cashier"
+	}
+
+	resp := QuickBillingResponse{
+		Success:         true,
+		SessionID:       sess.ID.String(),
+		OrderID:         ord.ID.String(),
+		OrderNumber:     orderNum,
+		InvoiceNumber:   invoiceNum,
+		CreatedAt:       now.Format(time.RFC3339),
+		OrderType:       orderType,
+		TableNumber:     tableNumToRecord,
+		CustomerName:    customerName,
+		CustomerPhone:   sess.CustomerPhone,
+		CashierName:     cashierName,
+		SubtotalMinor:   ord.Subtotal.AmountMinorUnits,
+		CGSTMinor:       cgstMinor,
+		SGSTMinor:       sgstMinor,
+		GrandTotalMinor: ord.Total.AmountMinorUnits,
+		TenderedMinor:   req.Payment.TenderedMinor,
+		ChangeMinor:     req.Payment.ChangeMinor,
+		PaymentMethod:   string(req.Payment.Method),
+		Items:           respItems,
+	}
+
+	jsonResponse(w, http.StatusOK, resp)
+}
+
+
