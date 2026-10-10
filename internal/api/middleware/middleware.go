@@ -221,7 +221,7 @@ func (m *IdempotencyManager) Middleware() func(http.Handler) http.Handler {
 	return func(next http.Handler) http.Handler {
 		return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 			key := r.Header.Get("Idempotency-Key")
-			if key == "" {
+			if key == "" || r.URL.Path == "/api/v1/public/assistant/chat" {
 				next.ServeHTTP(w, r)
 				return
 			}

@@ -319,8 +319,18 @@ func TestPhase5E2EResilienceAndFallbackMatrix(t *testing.T) {
 		if len(sessDetails.Orders) == 0 {
 			t.Fatalf("expected non-empty orders in fallback poll response")
 		}
-		if sessDetails.Orders[0].Status != order.StateAccepted {
-			t.Fatalf("expected order status ACCEPTED in fallback poll response, got %s", sessDetails.Orders[0].Status)
+		var polledOrder *order.Order
+		for i := range sessDetails.Orders {
+			if sessDetails.Orders[i].ID == ord3.ID {
+				polledOrder = &sessDetails.Orders[i]
+				break
+			}
+		}
+		if polledOrder == nil {
+			t.Fatalf("expected order %s in fallback poll response", ord3.ID)
+		}
+		if polledOrder.Status != order.StateAccepted {
+			t.Fatalf("expected order %s status ACCEPTED in fallback poll response, got %s", ord3.ID, polledOrder.Status)
 		}
 
 		// Staff payment confirmation via HTTP

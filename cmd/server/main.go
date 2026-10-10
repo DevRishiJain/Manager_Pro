@@ -170,6 +170,8 @@ func main() {
 	if aiCatalogSvc != nil {
 		apiHandler.SetAICatalogService(aiCatalogSvc)
 	}
+	apiHandler.SetAssistantService(service.NewAssistantService(cfg.AI.GeminiAPIKey, cfg.AI.LLMModel))
+	logger.Info("TableOS helper initialized", "gemini_configured", cfg.AI.GeminiAPIKey != "", "model", cfg.AI.LLMModel)
 
 	// Real-Time WebSocket Hub, Ticket Manager & Outbox Dispatcher (§Phase 2)
 	wsHub := ws.NewHub()

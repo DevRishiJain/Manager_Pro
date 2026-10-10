@@ -79,6 +79,9 @@ func NewRouter(handler *handlers.APIHandler, repo storage.Repository, jwtSecret 
 		api.Post("/auth/reset-password", handler.ResetPassword)
 		api.Post("/staff/forgot-password", handler.ForgotPassword)
 		api.Post("/staff/reset-password", handler.ResetPassword)
+		assistantLimiter := middleware.NewRateLimiter(8, time.Minute)
+		api.With(assistantLimiter.Middleware).Post("/public/assistant/chat", handler.AssistantChat)
+
 		api.Post("/public/onboard", handler.OnboardRestaurant)
 		api.Post("/auth/restaurant/signup", handler.OnboardRestaurant)
 		api.Post("/webhooks/razorpay", handler.RazorpayWebhook)

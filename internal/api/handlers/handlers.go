@@ -40,6 +40,7 @@ type APIHandler struct {
 	analyticsService  *service.AnalyticsService
 	onboardingService *service.OnboardingService
 	aiCatalogService  *service.AICatalogService
+	assistantService  *service.AssistantService
 	staffService      *service.StaffService
 	expenseService    *service.ExpenseService
 	inventoryService  *service.InventoryService
