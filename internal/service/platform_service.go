@@ -2,6 +2,8 @@ package service
 
 import (
 	"context"
+	"fmt"
+	"strings"
 	"time"
 
 	"github.com/devrishijain/table-manager/internal/domain/restaurant"
@@ -50,10 +52,18 @@ func EnsureSuperAdmin(ctx context.Context, repo storage.Repository, email, passw
 		return err
 	}
 
+	empID := "EMP-SUP-001"
+	if taken, _ := repo.GetStaffByEmployeeID(ctx, restaurant.PlatformRestaurantID, empID); taken != nil {
+		empID = fmt.Sprintf("EMP-SUP-%03d", (time.Now().Unix()%900)+100)
+		if taken2, _ := repo.GetStaffByEmployeeID(ctx, restaurant.PlatformRestaurantID, empID); taken2 != nil {
+			empID = fmt.Sprintf("EMP-SUP-%s", strings.ToUpper(uuid.New().String()[:4]))
+		}
+	}
+
 	admin := &restaurant.StaffUser{
 		ID:           uuid.New(),
 		RestaurantID: restaurant.PlatformRestaurantID,
-		EmployeeID:   "EMP-SUP-001",
+		EmployeeID:   empID,
 		Name:         "Platform Super Admin",
 		Email:        email,
 		PasswordHash: string(hash),

@@ -126,11 +126,15 @@ type Repository interface {
 	ListCategories(ctx context.Context, restaurantID uuid.UUID) ([]restaurant.MenuCategory, error)
 	CreateMenuItem(ctx context.Context, m *restaurant.MenuItem) error
 	GetMenuItemByID(ctx context.Context, id uuid.UUID) (*restaurant.MenuItem, error)
+	GetMenuItemsByIDs(ctx context.Context, ids []uuid.UUID) (map[uuid.UUID]*restaurant.MenuItem, error)
 	ListMenuItems(ctx context.Context, restaurantID uuid.UUID) ([]restaurant.MenuItem, error)
 	UpdateMenuItemAvailability(ctx context.Context, id uuid.UUID, isAvailable bool) error
 	ListVariantsByMenuItemIDs(ctx context.Context, menuItemIDs []uuid.UUID) (map[uuid.UUID][]restaurant.MenuItemVariant, error)
 	ReplaceMenuItemVariants(ctx context.Context, menuItemID uuid.UUID, variants []restaurant.MenuItemVariant) error
 	GetMenuItemVariantByID(ctx context.Context, id uuid.UUID) (*restaurant.MenuItemVariant, error)
+
+	// Quick Billing atomic transaction
+	CreateQuickBillingTransaction(ctx context.Context, s *session.DiningSession, o *order.Order, items []order.OrderItem, p *payment.Payment) error
 
 	GetSettings(ctx context.Context, restaurantID uuid.UUID) (*restaurant.RestaurantSettings, error)
 	UpdateSettings(ctx context.Context, s *restaurant.RestaurantSettings) error

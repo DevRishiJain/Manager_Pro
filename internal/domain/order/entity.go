@@ -27,10 +27,11 @@ const (
 	StateReady            State = "READY"
 	StateServed           State = "SERVED"
 	StateCancelled        State = "CANCELLED"
+	StateCompleted        State = "COMPLETED"
 )
 
 func (s State) IsTerminal() bool {
-	return s == StateServed || s == StateRejected || s == StateCancelled
+	return s == StateServed || s == StateRejected || s == StateCancelled || s == StateCompleted
 }
 
 type CancellationStage string
@@ -57,18 +58,25 @@ var AllowedOrderTransitions = map[State][]State{
 	StateAccepted: {
 		StatePreparing,
 		StateCancelled,
+		StateCompleted,
 	},
 	StatePreparing: {
 		StateReady,
+		StateServed,
+		StateCompleted,
 		StateCancelled,
 	},
 	StateReady: {
 		StateServed,
+		StateCompleted,
 		StateCancelled,
 	},
-	StateServed:    {},
+	StateServed: {
+		StateCompleted,
+	},
 	StateRejected:  {},
 	StateCancelled: {},
+	StateCompleted: {},
 }
 
 func ValidateTransition(current, target State) error {
